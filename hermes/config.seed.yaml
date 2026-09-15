@@ -1,0 +1,10 @@
+# Initial Hermes config for the VPS stack. Copied to $HERMES_DATA_DIR/config.yaml
+# by install.sh only when no config.yaml exists. Everything else is set later with
+# `hermes setup`, `hermes model`, or the dashboard/workspace UI.
+terminal:
+  backend: "local"
+  # Host directory /srv/hermes/workspace is mounted here in both containers.
+  cwd: "/workspace"
+  # auto = inside containers, tool subprocesses use HERMES_HOME/home (/opt/data/home)
+  home_mode: "auto"
+  timeout: 180
