@@ -157,3 +157,16 @@ persisted); permanent additions go in `hermes/Dockerfile`.
 
 Messaging platforms (Telegram/Discord — via `hermes setup` later), backups,
 monitoring, Traefik dashboard, exposing the gateway API publicly.
+
+## Deviations found during implementation (2026-09-16)
+
+- `hermes/config.seed.yaml` dropped: the image's stage2 hook seeds `config.yaml` from
+  `cli-config.yaml.example` on first boot. `install.sh` runs
+  `hermes config set terminal.cwd /workspace` after the container is healthy instead.
+- `API_SERVER_HOST=127.0.0.1` (not `0.0.0.0`): the workspace shares the network namespace,
+  so loopback is enough and the gateway's "network-accessible + local terminal" warning goes away.
+- `API_SERVER_KEY` must be ≥ 16 chars or the api_server refuses to start; `install.sh` enforces it.
+- Traefik `v3.7`: `v3.5` fails against Docker 29 ("client version 1.24 is too old").
+- `auth.sh claude` uses `claude auth login` (refreshable credentials Hermes borrows);
+  `claude-token` keeps the `setup-token` path. `grok login --device-auth` for headless.
+- `ALLOW_NON_ROOT=1` escape hatch in `install.sh` for local testing.
