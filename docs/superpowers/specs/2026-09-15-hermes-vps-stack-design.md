@@ -290,3 +290,13 @@ Four-angle review (security, shell, docker/ops, docs). Changes:
   so `--certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}` next to `--configfile` was
   ignored and Let's Encrypt was asked with the `placeholder@example.com` from the file → "contact
   email has forbidden domain" → no certificate ever. Same settings, one source.
+
+## Addendum — Docker-in-Docker sidecar (2026-09-16)
+
+The agent and Orca need to `docker compose up` the projects they write, without any access to
+the host daemon. Service `dind` (profile `dind`, `docker:dind`, privileged, own `dockerd`,
+`/workspace` mounted at the same path, `hermes-dind-data` volume) on a dedicated `dind` network;
+`DOCKER_HOST=tcp://dind:2375` on `hermes-agent` and `orca`; docker CLI + compose plugin copied
+from `docker:cli` into the agent image (Orca inherits). Ports 80/443 of the test daemon published
+on `DESKTOP_BIND` as 8080/8443. `auth.sh dind [off]` toggles the profile and an idempotent
+"Docker" note in the agent's `SOUL.md`. Real deployment stays a manual `docker compose up` on the VPS.

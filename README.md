@@ -4,8 +4,10 @@ Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace
 (HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
 subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar,
 host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
-weekly auto-updates, a self-healing timer, and an optional [Orca](https://www.onorca.dev) remote
-server to drive the same CLIs on the same projects yourself, from desktop or phone.
+weekly auto-updates, a self-healing timer, an optional [Orca](https://www.onorca.dev) remote
+server to drive the same CLIs on the same projects yourself, from desktop or phone, and an
+optional Docker-in-Docker sidecar so the agent and Orca can `docker compose up` and test the
+projects they write.
 
 ```
 Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (https://WORKSPACE_HOST, password)
@@ -13,6 +15,7 @@ Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-w
                     └▶ docker-socket-proxy   ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
 Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
 Tailnet ──6768──▶ orca (optional: claude/codex/grok yourself, from the Orca desktop/mobile app)
+Tailnet ──8080/8443▶ dind (optional: private Docker daemon; hermes-agent + orca ──DOCKER_HOST──▶ dind:2375)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
 ├── stack/                   this repo: compose, scripts, .env
@@ -118,7 +121,8 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then offers to recreate the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
 | `obsidian` | `ob login` + `ob sync-setup --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
 | `orca [desktop\|mobile]` | enables the `orca` profile, builds/starts the Orca remote server, prints the pairing link (or the mobile QR) | `/srv/hermes/data/home/.config/orca/` |
-| `status` | shows all of the above + update hold / backup timer / orca / obsidian | |
+| `dind [off]` | enables the `dind` profile: a private Docker daemon the agent and Orca use for `docker compose up` on their projects (see below); `off` removes it | volume `hermes-dind-data` |
+| `status` | shows all of the above + update hold / backup timer / orca / dind / obsidian | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 | `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
 
@@ -183,6 +187,42 @@ be a private IP; `ORCA_ALLOW_PUBLIC=1 sudo ./auth.sh orca` overrides the refusal
 
 You and the Hermes agent share the files: Orca isolates its sessions in git worktrees, but
 nothing locks a plain checkout — keep agent work on branches/worktrees too.
+
+## Docker for the agent (optional, Docker-in-Docker)
+
+The agent container has no Docker daemon and no access to the host's (only Traefik sees it,
+read-only, through the socket proxy). So out of the box Hermes and Orca can write a compose
+project but not run it. `sudo ./auth.sh dind` adds a **second, private Docker daemon**
+(`docker:dind`, compose profile `dind`) and points `DOCKER_HOST=tcp://dind:2375` in
+`hermes-agent` and `orca` at it: their `docker compose up`, `docker build`, `docker logs` … land
+in that daemon, never on the VPS one.
+
+```
+VPS dockerd ─ traefik, hermes-agent, orca, …
+            └ dind (privileged, own dockerd, ports 80/443 free inside)
+                 └ <project>-traefik-1, <project>-app-1 …   ← created by hermes/orca
+```
+
+- `/workspace` is mounted at the same path in `dind`, so bind mounts of a project under
+  `/workspace/<project>` (`./conf:/etc/app`) resolve. Paths outside `/workspace` do not.
+- Ports a project publishes are published **on `dind`**: the agent tests with
+  `curl http://dind:80`; you open `http://<tailscale-ip>:8080` / `https://<tailscale-ip>:8443`
+  (= 80/443 of the test daemon, `DIND_HTTP_PORT`/`DIND_HTTPS_PORT`). A project with its own
+  Traefik runs unmodified — no clash with the stack's Traefik.
+- `auth.sh dind` appends a short "Docker" note to the agent's `SOUL.md` (`/srv/hermes/data/SOUL.md`,
+  always in its system prompt) with these rules; `dind off` removes it.
+- Files written by containers inside dind are owned by root on the host (a compose volume
+  initialised by the app, for instance) — `chown` them if the agent must edit them afterwards.
+- Deploying for real stays a human step: `docker compose up -d` on the VPS, outside this stack
+  (a project's Traefik cannot bind 80/443 there; attach it to the `proxy` network and reuse the
+  stack's Traefik with labels instead).
+
+Security: `dind` runs `privileged` (a daemon needs it); that is the boundary. The agent talks to
+it over plain TCP on the `dind` network only (agent + Orca + dind, nothing else) and gets root
+*inside dind*, not on the host. Images, layers and volumes of the test daemon live in the
+`hermes-dind-data` volume (not backed up, `docker volume rm hermes-dind-data` to reset;
+`DIND_MEM_LIMIT`, `DIND_CPUS` in `.env`). `update.sh` updates `docker:dind` with the rest;
+containers inside come back on their own restart policy when the daemon restarts.
 
 ## Obsidian vault (optional)
 
@@ -258,7 +298,7 @@ docker compose logs -f hermes-agent        # gateway + dashboard (s6-supervised)
 docker compose logs -f hermes-workspace
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
-sudo ./auth.sh status                       # logins, update hold, backup timer, orca, obsidian
+sudo ./auth.sh status                       # logins, update hold, backup timer, orca, dind, obsidian
 sudo ./update.sh                            # rebuild on latest base image, pull, recreate (auto-rollback if unhealthy)
 sudo ./update.sh rollback                   # back to the images that ran before the last update, and hold
 sudo ./update.sh resume                     # lift the hold
@@ -287,7 +327,7 @@ otherwise the service is back within a minute.
 **Restarting the agent:** `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` (not `restart` —
 `hermes-workspace` and `hermes-dashboard` live in its network namespace and must be recreated
 with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resource limits:
-`AGENT_MEM_LIMIT`, `AGENT_CPUS`, `WORKSPACE_MEM_LIMIT`, `ORCA_MEM_LIMIT`, `ORCA_CPUS` in `.env`;
+`AGENT_MEM_LIMIT`, `AGENT_CPUS`, `WORKSPACE_MEM_LIMIT`, `ORCA_MEM_LIMIT`, `ORCA_CPUS`, `DIND_MEM_LIMIT`, `DIND_CPUS` in `.env`;
 traefik/dashboard/obsidian have fixed limits in the compose file.
 
 **Updating these scripts:** `cd /srv/hermes/stack && git pull` (as `hermes`, no sudo) then
@@ -320,7 +360,7 @@ certificate stays in `acme.json`, harmless.
 sudo systemctl disable --now hermes-backup.timer hermes-update.timer hermes-heal.timer
 sudo rm /etc/systemd/system/hermes-* && sudo systemctl daemon-reload
 cd /srv/hermes/stack && docker compose --profile '*' down --remove-orphans
-docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps orca-server obsidian-sync
+docker volume rm hermes-restic-cache hermes-dind-data; docker image rm hermes-agent-vps orca-server obsidian-sync
 sudo rm -rf /srv/hermes            # data + every secret
 ```
 `harden.sh` leftovers if you want the host back to stock: `/etc/ufw/after*.rules` (HERMES block),
@@ -332,8 +372,8 @@ sudo rm -rf /srv/hermes            # data + every secret
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), orca (profile `orca`), obsidian-sync (profile `obsidian`) |
-| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
+| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), orca (profile `orca`), obsidian-sync (profile `obsidian`), dind (profile `dind`) |
+| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq`, docker CLI + compose plugin + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
 | `orca/Dockerfile` | stage 1 downloads + sha512-verifies + extracts the Orca AppImage; stage 2 = agent image + Electron headless libs + Xvfb (`orca serve`) |
 | traefik (compose `command:`) | static config as flags: 80→443 redirect, docker provider via `docker-socket-proxy`, `cloudflare` ACME resolver |

@@ -30,8 +30,14 @@ RUN npm install -g --no-audit --no-fund --fetch-retries=5 \
         @xai-official/grok && \
     npm cache clean --force
 
+# Docker CLI + compose plugin (static binaries from the official docker:cli image; the base image
+# ships an apt docker CLI without compose). There is no daemon here: DOCKER_HOST points at the
+# dind sidecar (compose profile `dind`), so the agent and Orca can `docker compose up` a project.
+COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+
 # Disable CLI self-updaters: the install tree is immutable and updates come from image rebuilds.
 ENV DISABLE_AUTOUPDATER=1 \
     CODEX_DISABLE_UPDATE_CHECK=1
 
-RUN gh --version && claude --version && codex --version && grok --version
+RUN gh --version && claude --version && codex --version && grok --version && docker compose version

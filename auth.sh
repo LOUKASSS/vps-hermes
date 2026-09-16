@@ -4,7 +4,7 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | status | shell | chat
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | dind | status | shell | chat
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -114,6 +114,13 @@ do_status() {
   else
     echo "not enabled (run: $0 orca)"
   fi
+  echo; echo "── dind (docker for the agent) ──"
+  if [[ ",${COMPOSE_PROFILES:-}," == *,dind,* ]]; then
+    echo "daemon: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' dind 2>/dev/null || echo 'not created')  → test ports ${DESKTOP_BIND:-?}:${DIND_HTTP_PORT:-8080}/${DIND_HTTPS_PORT:-8443}"
+    agent_run docker ps --format 'running in dind: {{.Names}} ({{.Image}})' 2>/dev/null || echo "agent cannot reach dind"
+  else
+    echo "not enabled (run: $0 dind)"
+  fi
   echo; echo "── obsidian ──"
   if [[ ",${COMPOSE_PROFILES:-}," == *,obsidian,* ]]; then
     docker inspect -f 'sidecar: {{.State.Status}}' obsidian-sync 2>/dev/null || echo "sidecar: not created"
@@ -183,6 +190,66 @@ Treat the link like a password (revocable under Shared Server Access in the app)
 MSG
 }
 
+# auth.sh dind [off] — enable (or remove) the Docker-in-Docker sidecar the agent and Orca use
+# for `docker compose up` of the projects under /workspace. Also drops a short note in the
+# agent's SOUL.md (HERMES_HOME, always in its system prompt) so it tests against `dind`, not
+# localhost, and knows nothing it starts reaches the VPS itself.
+DIND_NOTE_BEGIN="<!-- hermes-stack:dind -->"
+DIND_NOTE_END="<!-- /hermes-stack:dind -->"
+dind_note() {
+  local soul="$HERMES_DATA_DIR/SOUL.md"
+  [ -f "$soul" ] || return 0
+  # Strip a previous copy, then append (idempotent).
+  sed -i "\|^$DIND_NOTE_BEGIN\$|,\|^$DIND_NOTE_END\$|d" "$soul"
+  [ "${1:-add}" = add ] || return 0
+  cat >> "$soul" <<NOTE
+$DIND_NOTE_BEGIN
+
+## Docker
+\`docker\` / \`docker compose\` here talk to a private test daemon (\`dind\`, DOCKER_HOST=tcp://dind:2375),
+NOT the VPS. Ports a compose file publishes are on the host \`dind\`: test with \`curl http://dind:<port>\`,
+never localhost. Bind mounts only work for paths under /workspace. Nothing you start there is
+deployed: the operator runs \`docker compose up\` on the VPS themselves. Clean up with \`docker compose down\`.
+$DIND_NOTE_END
+NOTE
+}
+
+do_dind() {
+  if [ "${1:-}" = off ]; then
+    disable_profile dind
+    compose --profile dind stop dind 2>/dev/null || true
+    compose --profile dind rm -f dind 2>/dev/null || true
+    dind_note remove
+    info "dind removed (profile off). Its images/volumes stay in the hermes-dind-data volume: docker volume rm hermes-dind-data"
+    return 0
+  fi
+  [ -z "${1:-}" ] || die "usage: $0 dind [off]"
+  case "${DESKTOP_BIND:-}" in
+    ""|0.0.0.0|"::") die "DESKTOP_BIND is '${DESKTOP_BIND:-unset}': the test ports would listen on every interface. Set it to the Tailscale IP first." ;;
+  esac
+  info "Docker-in-Docker sidecar for the agent/Orca (test daemon; nothing it runs touches the VPS)."
+  enable_profile dind
+  compose pull -q dind
+  compose up -d dind
+  info "Waiting for dind (up to 2 min)…"
+  wait_healthy dind 120 || { compose logs --tail=30 dind; die "dind not healthy"; }
+  # The agent image needs the compose plugin (rebuilt by install.sh/update.sh since this feature).
+  agent_run docker compose version >/dev/null 2>&1 \
+    || die "the agent image has no 'docker compose' yet: run sudo $STACK_DIR/update.sh --force, then re-run $0 dind"
+  agent_run docker version --format 'agent → dind: server {{.Server.Version}}' \
+    || die "the agent cannot reach dind (DOCKER_HOST=tcp://dind:2375): docker compose logs dind"
+  dind_note add
+  cat <<MSG
+
+  Agent / Orca : docker compose up -d   (in /workspace/<project>) runs inside dind
+  Your browser : http://${DESKTOP_BIND}:${DIND_HTTP_PORT:-8080}  https://${DESKTOP_BIND}:${DIND_HTTPS_PORT:-8443}   (= ports 80/443 of the test daemon)
+  Agent tests  : curl http://dind:80 / https://dind:443 (ports published in dind live on host "dind")
+  Inspect      : docker exec dind docker ps          Reset: sudo $0 dind off; docker volume rm hermes-dind-data
+
+Deploying for real is still yours: docker compose up -d on the VPS, outside this stack.
+MSG
+}
+
 do_shell() { agent_exec bash; }
 # Interactive Hermes CLI in the agent container: same config, sessions and /workspace as the
 # gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
@@ -195,6 +262,7 @@ run_target() {
     7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
     9|orca) do_orca "${2:-desktop}" ;;
     10|status) do_status ;; 11|shell) do_shell ;; 12|chat) do_chat "$@" ;;
+    13|dind) do_dind "${2:-}" ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -216,6 +284,7 @@ Hermes stack — auth
  10) status        Show login state
  11) shell         Shell inside the agent container
  12) chat          Hermes CLI chat inside the agent container (hermes chat)
+ 13) dind          Docker-in-Docker sidecar: lets the agent/Orca `docker compose up` projects (test only)
   q) quit
 MENU
   read -r -p "> " choice
@@ -223,7 +292,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|status|shell|chat [hermes chat args]]"
+  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|dind [off]|status|shell|chat [hermes chat args]]"
 else
   while true; do menu; echo; done
 fi

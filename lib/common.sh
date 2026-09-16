@@ -102,6 +102,13 @@ enable_profile() {
   export COMPOSE_PROFILES="$cur"
 }
 
+# disable_profile <name> — the reverse.
+disable_profile() {
+  local cur; cur="$(env_val COMPOSE_PROFILES)"
+  cur="$(printf '%s' ",$cur," | sed "s/,$1,/,/g; s/^,//; s/,\$//")"
+  set_env COMPOSE_PROFILES "$cur"; export COMPOSE_PROFILES="$cur"
+}
+
 # Interactive command inside the agent container, as the runtime user, with HOME set
 # to the tool-subprocess home so CLI credentials land where the agent's own tool calls
 # will find them (/opt/data/home/.claude, .codex, .grok, .config/gh).
