@@ -1,0 +1,116 @@
+# Hermes Agent + Hermes Workspace + Traefik — single-VPS stack.
+#
+#   install.sh  → first boot on a fresh VPS
+#   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh)
+#   update.sh   → rebuild + pull + recreate
+#
+# Topology:
+#   traefik ──proxy──▶ hermes-agent netns ─ :3000 hermes-workspace (public via Traefik)
+#                                          ├ :8642 gateway API (127.0.0.1 only)
+#                                          └ :9119 dashboard (127.0.0.1 only, no auth gate)
+#
+# hermes-workspace runs with network_mode: service:hermes-agent so it can reach the
+# loopback-only dashboard (its session token is scraped from the dashboard root HTML,
+# which is only served unauthenticated on a loopback bind). Because port 3000 therefore
+# lives in the hermes-agent container's network namespace, the Traefik labels are on
+# hermes-agent, not on hermes-workspace.
+
+x-hermes-uid: &hermes-uid
+  HERMES_UID: ${HERMES_UID:-1000}
+  HERMES_GID: ${HERMES_GID:-1000}
+  TZ: ${TZ:-UTC}
+
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --configfile=/etc/traefik/traefik.yml
+      - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}
+    environment:
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ${TRAEFIK_DIR:-/srv/hermes/traefik}/acme.json:/acme/acme.json
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  hermes-agent:
+    build:
+      context: ./hermes
+      pull: true
+    image: hermes-agent-vps:latest
+    container_name: hermes-agent
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    shm_size: 1g
+    mem_limit: ${AGENT_MEM_LIMIT:-4g}
+    cpus: ${AGENT_CPUS:-2}
+    environment:
+      <<: *hermes-uid
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 127.0.0.1
+      HERMES_DASHBOARD_PORT: "9119"
+      API_SERVER_ENABLED: "true"
+      # Loopback is enough: hermes-workspace shares this network namespace.
+      API_SERVER_HOST: 127.0.0.1
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: ${API_SERVER_KEY}
+    volumes:
+      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
+      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:9119/api/status >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      traefik.http.routers.workspace.rule: Host(`${WORKSPACE_HOST}`)
+      traefik.http.routers.workspace.entrypoints: websecure
+      traefik.http.routers.workspace.tls.certresolver: cloudflare
+      traefik.http.routers.workspace.service: workspace
+      traefik.http.services.workspace.loadbalancer.server.port: "3000"
+
+  hermes-workspace:
+    image: ghcr.io/outsourc-e/hermes-workspace:latest
+    container_name: hermes-workspace
+    restart: unless-stopped
+    network_mode: "service:hermes-agent"
+    depends_on:
+      hermes-agent:
+        condition: service_healthy
+    environment:
+      <<: *hermes-uid
+      HERMES_HOME: /home/workspace/.hermes
+      HERMES_WORKSPACE_DIR: /workspace
+      HERMES_API_URL: http://127.0.0.1:8642
+      HERMES_DASHBOARD_URL: http://127.0.0.1:9119
+      HERMES_API_TOKEN: ${API_SERVER_KEY}
+      HERMES_PASSWORD: ${HERMES_PASSWORD}
+      COOKIE_SECURE: "1"
+      TRUST_PROXY: "1"
+      HOST: 0.0.0.0
+      PORT: "3000"
+    volumes:
+      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/home/workspace/.hermes
+      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+
+networks:
+  proxy:
+    name: proxy
