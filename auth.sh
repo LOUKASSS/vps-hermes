@@ -108,6 +108,8 @@ do_status() {
   else
     echo "not configured (run: $STACK_DIR/backup.sh setup)"
   fi
+  echo; echo "── dns ──"
+  echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$WORKSPACE_HOST} + *.${DNS_ZONE:-$WORKSPACE_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
     echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  (pairing link: $STACK_DIR/orca.sh pair)"

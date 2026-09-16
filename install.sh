@@ -36,6 +36,14 @@ chmod 600 .env
 ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)"
 ask ACME_EMAIL       "Email for Let's Encrypt"
 ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit)" secret
+# DNS zone served to the tailnet: WORKSPACE_HOST itself unless you chose a wider one.
+_zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
+[ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
+case "$_host" in "$_zone"|*".$_zone") ;; *) die "WORKSPACE_HOST=$_host is not under DNS_ZONE=$_zone (fix DNS_ZONE in .env)." ;; esac
+# Port 53 is published on the Tailscale IP; a resolver bound to 0.0.0.0 (or that IP) would clash.
+if ss -lunH 'sport = :53' 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]|100\.)'; then
+  warn "something already listens on :53 for all interfaces ($(ss -lunpH 'sport = :53' | awk '{print $4, $NF}' | head -n1)) — the dns service will fail to start until it is moved/stopped."
+fi
 
 # The gateway api_server refuses keys shorter than 16 chars.
 _key="$(env_val API_SERVER_KEY)"
@@ -56,7 +64,7 @@ if [ -n "$TS_IP" ]; then
   esac
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
-  warn "No Tailscale IP found: Desktop backend (9120) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+  warn "No Tailscale IP found: Desktop backend (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
@@ -122,7 +130,10 @@ fi
 compose ps
 cat <<MSG
 
-  Workspace URL : https://${WORKSPACE_HOST}$([ -n "$TS_IP" ] && printf '   (DNS A record → %s, tailnet only)' "$TS_IP")
+  Workspace URL : https://${WORKSPACE_HOST}   (tailnet only)
+  Tailnet DNS   : ${DESKTOP_BIND}:53 answers ${DNS_ZONE} and *.${DNS_ZONE} → ${DESKTOP_BIND}
+                  Tailscale admin console → DNS → Nameservers → Add nameserver → Custom → ${DESKTOP_BIND},
+                  "Restrict to domain" → ${DNS_ZONE}   (MagicDNS on). Then every tailnet device resolves the URL.
   Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
   Hermes Desktop: Settings → Gateways → Remote gateway → http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}
                   user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)

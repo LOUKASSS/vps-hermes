@@ -9,6 +9,7 @@ server **on the host** to drive the same CLIs on the same projects yourself, fro
 phone — with Docker and sudo, so your Orca sessions can deploy on this VPS.
 
 ```
+Tailnet ──53────▶ hermes-dns  (DNS_ZONE + *.DNS_ZONE → this VPS; Tailscale split DNS points here)
 Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (https://WORKSPACE_HOST, password)
                     │                        ├ :8642 gateway API   (127.0.0.1 only)
                     └▶ docker-socket-proxy   ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
@@ -34,7 +35,8 @@ and Orca answer on the tailnet only (ufw: default deny, allow on `tailscale0`). 
 - Fresh **Ubuntu 22.04+** VPS (`harden.sh` is Ubuntu-only; the stack itself also runs on Debian 12+,
   without the isolation), root or sudo. Sized for **8 vCPU / 16 GB** with the defaults
   (`AGENT_MEM_LIMIT=10g`, `AGENT_CPUS=6`; lower them for a smaller box). No inbound port needed.
-- A Cloudflare zone for `<WORKSPACE_HOST>` (the A record is created after `harden.sh`, see below).
+- A Cloudflare zone containing `<WORKSPACE_HOST>` (for the Let's Encrypt DNS-01 challenge only —
+  no public A record: the tailnet resolves the name through the stack's own DNS, see below).
 - Cloudflare API token with **Zone → DNS → Edit** on that zone.
 - A Tailscale account (the VPS, your laptop and phone join the same tailnet).
 - The subscriptions you want to use: Claude **Max** (Anthropic OAuth needs Max + extra usage credits; Pro is not supported), ChatGPT Plus/Pro (Codex), SuperGrok / X Premium+.
@@ -69,9 +71,10 @@ What it does:
 - fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
   rotation), `/srv/hermes` owned by `hermes` with a copy of this repo in `/srv/hermes/stack`.
 
-Then in Cloudflare create the A record `<WORKSPACE_HOST>` → **Tailscale IP (100.x.y.z)**, DNS-only
-(grey cloud — proxied cannot reach a 100.x address). The workspace is only reachable from your
-tailnet; TLS still works because DNS-01 needs no inbound port.
+No public DNS record is needed: the stack runs its own DNS for the tailnet (below). The
+workspace is only reachable from your tailnet; TLS still works because DNS-01 needs no inbound
+port. (A Cloudflare A record `<WORKSPACE_HOST>` → Tailscale IP, DNS-only/grey cloud, is a
+harmless fallback for devices that do not use the tailnet DNS.)
 
 In the Tailscale admin console, open the machine and **Disable key expiry**: with SSH closed on
 the WAN, an expired node key (180 days by default) means a trip through the provider's console.
@@ -103,6 +106,26 @@ you set by hand and always re-derives `HERMES_UID/GID` from the `hermes` user.
 Open `https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
 stored in `.env`). The install summary prints secrets: clear the scrollback if the terminal is
 shared or recorded.
+
+### 2. Tailnet DNS (split DNS)
+
+`hermes-dns` (`dns/`: dnsmasq on Alpine, 32 MB) listens on the Tailscale IP, port 53, and answers
+`DNS_ZONE` and every name under it with that IP — nothing else, no forwarding. `DNS_ZONE`
+defaults to `WORKSPACE_HOST`; set a wider one in `.env` (e.g. `DNS_ZONE=hermes.example.com` with
+`WORKSPACE_HOST=workspace.hermes.example.com`) and every future `something.hermes.example.com`
+resolves to the VPS too — handy for your own projects behind this Traefik (join the `proxy`
+network, add labels, get a certificate from the same resolver). Then, once, in the
+[Tailscale admin console](https://login.tailscale.com/admin/dns) → DNS:
+
+1. MagicDNS: on.
+2. Nameservers → **Add nameserver → Custom** → the VPS Tailscale IP (`100.x.y.z`) →
+   **Restrict to domain** → `DNS_ZONE`.
+
+From then on every device on the tailnet (laptop, phone, the VPS itself) resolves
+`https://<WORKSPACE_HOST>` — and only that zone — through the VPS. Check: `sudo ./auth.sh status`
+(dns line), `nslookup <WORKSPACE_HOST>` from your laptop; `docker compose logs hermes-dns`.
+`install.sh` refuses a `WORKSPACE_HOST` outside `DNS_ZONE` and warns when another resolver already
+owns port 53 on all interfaces (Ubuntu's `systemd-resolved` only binds `127.0.0.53`, no clash).
 
 ## Auth: subscriptions instead of API keys
 
@@ -322,9 +345,10 @@ per container). Traefik access log is off. There is no monitoring or alerting in
 | Orca pairings | revoke in the app (Shared Server Access) |
 | CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again |
 
-Changing `WORKSPACE_HOST`: edit `.env`, create the new DNS record, `docker compose up -d
---force-recreate traefik hermes-agent` (the router labels live on `hermes-agent`); the old
-certificate stays in `acme.json`, harmless.
+Changing `WORKSPACE_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
+(recreates `hermes-dns`, `traefik` and the agent group — the router labels live on
+`hermes-agent`), update the restricted domain of the nameserver in the Tailscale admin console;
+the old certificate stays in `acme.json`, harmless.
 
 ### Uninstall
 
@@ -332,7 +356,7 @@ certificate stays in `acme.json`, harmless.
 sudo systemctl disable --now hermes-backup.timer hermes-update.timer hermes-heal.timer
 sudo rm /etc/systemd/system/hermes-* && sudo systemctl daemon-reload
 cd /srv/hermes/stack && docker compose --profile '*' down --remove-orphans
-docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps obsidian-sync
+docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps hermes-dns obsidian-sync
 sudo ./orca.sh remove              # if installed (then: apt remove nodejs gh; npm -g uninstall the CLIs)
 sudo rm -rf /srv/hermes            # data + every secret
 ```
@@ -345,7 +369,8 @@ sudo rm -rf /srv/hermes            # data + every secret
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), dns (built), obsidian-sync (profile `obsidian`) |
+| `dns/` | `alpine` + `dnsmasq`: authoritative-only answers for `DNS_ZONE`/`*.DNS_ZONE` → Tailscale IP, for Tailscale split DNS |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
 | `orca.sh` / `orca/orca.service` | Orca on the host: deps + Node + CLIs, sha512-verified AppImage under `/opt/orca/<tag>`, systemd unit template (install / update / rollback / pair / remove) |
@@ -365,7 +390,11 @@ sudo rm -rf /srv/hermes            # data + every secret
 - **`ufw reload` broke the containers** — ufw flushes Docker's iptables chains:
   `systemctl restart docker`.
 
-- **No certificate / browser warning** — `docker compose logs traefik`; check the DNS record and the
+- **`<WORKSPACE_HOST>` does not resolve** — the device is not using the tailnet DNS: Tailscale
+  admin console → DNS → nameserver `100.x.y.z` restricted to `DNS_ZONE`, MagicDNS on, and on the
+  device Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
+  must answer from anywhere on the tailnet.
+- **No certificate / browser warning** — `docker compose logs traefik`; check the Cloudflare zone and the
   token scope (Zone:DNS:Edit). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`
   emails.
 - **Workspace shows "Offline"** — inside the agent:

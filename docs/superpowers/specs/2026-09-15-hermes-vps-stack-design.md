@@ -301,3 +301,13 @@ symlinks, `orca.service` as user `hermes` with `HOME=/srv/hermes/data/home` so l
 with the agent, `MemoryMax=ORCA_MEM_LIMIT`). Orca sessions therefore have Docker and sudo on the
 VPS — the pairing link is a root credential. The agent container keeps no Docker access.
 `update.sh` calls `orca.sh update` last; `orca.sh rollback` is independent of the image rollback.
+
+## Addendum — tailnet DNS (2026-09-16)
+
+`dns` service (`dns/`: alpine + dnsmasq, `no-resolv`, `address=/DNS_ZONE/<Tailscale IP>` +
+`local=/DNS_ZONE/`), published on `DESKTOP_BIND:53` udp/tcp, healthcheck via busybox nslookup.
+Tailscale split DNS (nameserver = VPS Tailscale IP, restricted to `DNS_ZONE`) makes every tailnet
+device resolve `WORKSPACE_HOST` and any other name under the zone to the VPS: the public
+Cloudflare A record is no longer needed (Cloudflare stays for the DNS-01 challenge). `DNS_ZONE`
+defaults to `WORKSPACE_HOST`; install.sh enforces host ⊂ zone and warns about a resolver on all
+interfaces.

@@ -12,7 +12,8 @@
 #      │                                   ├ :8642 gateway API (127.0.0.1 only)
 #      └─▶ docker-socket-proxy (read-only  ├ :9119 dashboard (127.0.0.1 only, no auth gate)
 #          view of the Docker API)         └ :9120 hermes-dashboard for Desktop (basic auth)
-#   obsidian-sync (profile obsidian)
+#   dns :53 on the Tailscale IP — answers DNS_ZONE and *.DNS_ZONE with that IP, for Tailscale
+#   split DNS (admin console → DNS → nameserver restricted to DNS_ZONE). obsidian-sync (profile obsidian)
 #   Orca is NOT a container: orca.sh installs it on the host as a systemd service (orca.service).
 #
 # hermes-workspace runs with network_mode: service:hermes-agent so it can reach the
@@ -227,6 +228,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 60s
+
+  # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Publish on the Tailscale IP
+  # and point Tailscale split DNS at it: every device on the tailnet then resolves
+  # WORKSPACE_HOST (and any other name under DNS_ZONE, for your own projects behind this
+  # Traefik) to this VPS — no public A record needed. Forwards nothing: only the zone is answered.
+  dns:
+    build:
+      context: ./dns
+      pull: true
+    image: hermes-dns:latest
+    container_name: hermes-dns
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 32m
+    environment:
+      DNS_ZONE: ${DNS_ZONE:-${WORKSPACE_HOST}}
+      DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${DESKTOP_BIND:-127.0.0.1}:53:53/udp"
+      - "${DESKTOP_BIND:-127.0.0.1}:53:53/tcp"
+    healthcheck:
+      test: ["CMD-SHELL", "nslookup \"$$DNS_ZONE\" 127.0.0.1 >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # Obsidian Sync headless client (npm obsidian-headless, `ob`) in its own minimal image.
   # Keeps /srv/hermes/workspace/<vault> (the agent's /workspace/<vault>) in sync with your
