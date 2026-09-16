@@ -170,3 +170,15 @@ monitoring, Traefik dashboard, exposing the gateway API publicly.
 - `auth.sh claude` uses `claude auth login` (refreshable credentials Hermes borrows);
   `claude-token` keeps the `setup-token` path. `grok login --device-auth` for headless.
 - `ALLOW_NON_ROOT=1` escape hatch in `install.sh` for local testing.
+
+## Addendum 2026-09-16 — VPS isolation (`harden.sh`)
+
+Tailnet-only VPS: operator user `hermes` (NOPASSWD sudo, docker group, generated ed25519 key
+printed once then shredded), Tailscale (interactive or `TS_AUTHKEY`), ufw deny-in with
+`allow in on tailscale0` + UDP 41641 on WAN, `DOCKER-USER` chain pre-created in
+`/etc/ufw/after{,6}.rules` (RETURN tailscale0/ESTABLISHED, DROP NEW from WAN NIC) so Traefik's
+published ports are tailnet-only, 10-minute `systemd-run` anti-lockout guard before sshd
+hardening (`00-hermes-hardening.conf`: keys only, no root, `AllowUsers hermes`),
+unattended-upgrades (Ubuntu security/updates + `site=download.docker.com`,
+`site=pkgs.tailscale.com`, auto-reboot 04:30), fail2ban, sysctl, journald, Docker daemon.json.
+`WORKSPACE_HOST` DNS A record must point at the Tailscale IP (DNS-only). Compose unchanged.

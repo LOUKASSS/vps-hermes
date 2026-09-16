@@ -27,8 +27,42 @@ them. Only `https://<WORKSPACE_HOST>` is published.
 
 ## Install
 
+### 0. Isolate the VPS first (`harden.sh`, Ubuntu)
+
+Run once as root on the fresh VPS, before the stack:
+
 ```bash
 git clone <this repo> hermes-setup && cd hermes-setup
+sudo ./harden.sh                 # TS_AUTHKEY=tskey-... sudo ./harden.sh  for non-interactive Tailscale join
+```
+
+What it does:
+
+- creates the operator user **`hermes`** (sudo without password, `docker` group), generates an
+  **ed25519 key pair**, installs the public key and **prints both keys once** — save the private
+  key as `~/.ssh/hermes_vps` on your laptop; it is shredded from the server afterwards
+  (`--keep-key` to retain, `--rotate-key` to regenerate);
+- installs **Tailscale** and joins your tailnet (interactive URL, or `TS_AUTHKEY`);
+- **ufw**: deny in by default, allow everything on `tailscale0`, only UDP 41641 on the WAN NIC;
+  a `DOCKER-USER` block makes Docker-published ports (Traefik 80/443) unreachable from the
+  Internet but reachable from the tailnet (`--keep-public-ssh` keeps rate-limited SSH on WAN);
+- **anti-lockout**: the firewall auto-disables after 10 min unless you confirm that
+  `ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>` works from another terminal;
+- then **sshd** hardening: keys only, no root, `AllowUsers hermes`, `MaxAuthTries 3`;
+- **unattended-upgrades** (security + updates + Docker/Tailscale repos), unused-package cleanup,
+  automatic reboot at 04:30 when required, `needrestart` in auto mode;
+- fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
+  rotation), a copy of this repo in `/home/hermes/hermes-setup`.
+
+Then in Cloudflare create the A record `<WORKSPACE_HOST>` → **Tailscale IP (100.x.y.z)**, DNS-only
+(grey cloud). The workspace is only reachable from your tailnet; TLS still works because DNS-01
+needs no inbound port.
+
+### 1. Stack
+
+```bash
+ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>
+cd ~/hermes-setup
 sudo ./install.sh     # installs Docker if needed, asks host / email / CF token, builds, starts
 sudo ./auth.sh        # OAuth logins (menu)
 ```
@@ -91,11 +125,17 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
 | `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
+| `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
 | `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins / upgrade |
 | `lib/common.sh` | shared helpers |
 | `.env.example` | all variables |
 
 ## Troubleshooting
+
+- **Locked out?** The 10-minute guard disables ufw if you never confirmed. Otherwise use the
+  provider's console: `ufw disable`, fix Tailscale, re-run `harden.sh`.
+- **`ufw reload` broke the containers** — ufw flushes Docker's iptables chains:
+  `systemctl restart docker`.
 
 - **No certificate / browser warning** — `docker compose logs traefik`; check the DNS record and the
   token scope (Zone:DNS:Edit). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`

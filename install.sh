@@ -69,9 +69,14 @@ _key="$(env_val API_SERVER_KEY)"
 [ "${#_key}" -ge 16 ] || set_env API_SERVER_KEY "$(openssl rand -hex 32)"
 [ -n "$(env_val HERMES_PASSWORD)" ] || set_env HERMES_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 
-# Owner of /srv/hermes/*: the user who invoked sudo, else 1000.
-owner_uid="${SUDO_UID:-1000}"; owner_gid="${SUDO_GID:-1000}"
-[ "$owner_uid" -eq 0 ] && { owner_uid=1000; owner_gid=1000; }
+# Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh if present,
+# else the user who invoked sudo, else 1000.
+if id hermes >/dev/null 2>&1; then
+  owner_uid="$(id -u hermes)"; owner_gid="$(id -g hermes)"
+else
+  owner_uid="${SUDO_UID:-1000}"; owner_gid="${SUDO_GID:-1000}"
+  [ "$owner_uid" -eq 0 ] && { owner_uid=1000; owner_gid=1000; }
+fi
 [ "$(env_val HERMES_UID)" != "1000" ] && [ -n "$(env_val HERMES_UID)" ] || set_env HERMES_UID "$owner_uid"
 [ "$(env_val HERMES_GID)" != "1000" ] && [ -n "$(env_val HERMES_GID)" ] || set_env HERMES_GID "$owner_gid"
 
@@ -104,7 +109,7 @@ fi
 compose ps
 cat <<MSG
 
-  Workspace URL : https://${WORKSPACE_HOST}
+  Workspace URL : https://${WORKSPACE_HOST}$(command -v tailscale >/dev/null 2>&1 && ts=$(tailscale ip -4 2>/dev/null) && [ -n "$ts" ] && printf '   (DNS A record → %s, tailnet only)' "$ts")
   Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
