@@ -10,7 +10,8 @@ set -euo pipefail
 # shellcheck disable=SC1091
 . "$(dirname "$0")/lib/common.sh"
 
-need_root
+# ALLOW_NON_ROOT=1 is for local testing only (dirs must already be writable by you).
+[ "${ALLOW_NON_ROOT:-0}" = 1 ] || need_root
 cd "$STACK_DIR"
 
 # ── 1. Docker ────────────────────────────────────────────────────────────

@@ -60,7 +60,7 @@ do_gh() {
 
 do_status() {
   agent_run sh -c '
-    echo "── hermes providers ──"; hermes auth status 2>&1 || true
+    echo "── hermes providers ──"; hermes auth list 2>&1 || true; hermes config get model 2>&1 || true
     echo; echo "── claude ──"; claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
