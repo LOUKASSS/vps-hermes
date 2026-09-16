@@ -86,7 +86,11 @@ load_env
 info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}"
 mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
 touch "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
-chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR"
+chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
+# The stack dir (this repo, incl. .env) belongs to the operator too, so `docker compose` works
+# without sudo for the operator (docker group) and .env stays readable by them only.
+chown -R "$HERMES_UID:$HERMES_GID" "$STACK_DIR"
+chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
 # ── 4. Build + start ─────────────────────────────────────────────────────
 info "Building derived image (pulls nousresearch/hermes-agent:latest)…"

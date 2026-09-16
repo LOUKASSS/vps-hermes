@@ -10,10 +10,12 @@ Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-wor
                                              ├ :8642 gateway API   (127.0.0.1 only)
                                              └ :9119 dashboard     (127.0.0.1 only)
 
-/srv/hermes/data       → /opt/data (agent)  +  /home/workspace/.hermes (workspace)
-/srv/hermes/workspace  → /workspace (both)  ← drop files here for the agent
-/srv/hermes/traefik    → acme.json
-/srv/hermes/obsidian   → /data (obsidian-sync HOME: Obsidian Sync credentials)
+/srv/hermes/                 (owned by the operator user `hermes`)
+├── stack/                   this repo: compose, scripts, .env
+├── data/       → /opt/data (agent) + /home/workspace/.hermes (workspace)
+├── workspace/  → /workspace (both)  ← drop files here for the agent; vault/ inside
+├── traefik/    → acme.json
+└── obsidian/   → /data (obsidian-sync HOME: Obsidian Sync credentials)
 ```
 
 `hermes-workspace` shares the agent container's network namespace, so the dashboard and the
@@ -54,7 +56,7 @@ What it does:
 - **unattended-upgrades** (security + updates + Docker/Tailscale repos), unused-package cleanup,
   automatic reboot at 04:30 when required, `needrestart` in auto mode;
 - fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
-  rotation), a copy of this repo in `/home/hermes/hermes-setup`.
+  rotation), `/srv/hermes` owned by `hermes` with a copy of this repo in `/srv/hermes/stack`.
 
 Then in Cloudflare create the A record `<WORKSPACE_HOST>` → **Tailscale IP (100.x.y.z)**, DNS-only
 (grey cloud). The workspace is only reachable from your tailnet; TLS still works because DNS-01
@@ -64,14 +66,16 @@ needs no inbound port.
 
 ```bash
 ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>
-cd ~/hermes-setup
+cd /srv/hermes/stack
 sudo ./install.sh     # installs Docker if needed, asks host / email / CF token, builds, starts
 sudo ./auth.sh        # OAuth logins (menu)
 ```
 
 `install.sh` is idempotent. It writes `.env` (secrets generated: `API_SERVER_KEY`,
-`HERMES_PASSWORD`), creates `/srv/hermes/*` owned by the invoking user (`SUDO_UID`), builds the
-derived image, starts the stack, and sets the agent's working directory to `/workspace`.
+`HERMES_PASSWORD`), creates `/srv/hermes/*` owned by `hermes` (fallback: the invoking `SUDO_UID`),
+builds the derived image, starts the stack, and sets the agent's working directory to `/workspace`.
+Everything under `/srv/hermes` belongs to `hermes`, so day-to-day `docker compose …` from
+`/srv/hermes/stack` works without sudo (docker group).
 
 Open `https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
 stored in `.env`).

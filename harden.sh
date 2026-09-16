@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepare and isolate a fresh Ubuntu VPS before running install.sh:
-#   - operator user `hermes` (sudo NOPASSWD, docker group) with a generated ed25519 key
+#   - operator user `hermes` (sudo NOPASSWD, docker group) with a generated ed25519 key,
+#     owner of /srv/hermes (stack in /srv/hermes/stack, data next to it)
 #   - Tailscale; SSH + Traefik reachable ONLY through the tailnet
 #   - ufw with a DOCKER-USER block so Docker-published ports don't bypass the firewall
 #   - unattended-upgrades (security + updates + Docker/Tailscale repos), auto-reboot
@@ -79,13 +80,16 @@ else
   info "authorized_keys for $OP_USER already populated — keeping (use --rotate-key to replace)."
 fi
 
-# Put a copy of this repo in the operator's home so they can run install.sh from there.
-if [ "$STACK_DIR" != "$OP_HOME/hermes-setup" ]; then
-  info "Copying stack to $OP_HOME/hermes-setup"
-  rsync -a --delete --exclude .env "$STACK_DIR/" "$OP_HOME/hermes-setup/"
-  [ -f "$STACK_DIR/.env" ] && [ ! -f "$OP_HOME/hermes-setup/.env" ] && cp "$STACK_DIR/.env" "$OP_HOME/hermes-setup/.env"
-  chown -R "$OP_USER:$OP_USER" "$OP_HOME/hermes-setup"
+# Everything lives under /srv/hermes, owned by the operator: the stack (this repo) in
+# /srv/hermes/stack, data dirs next to it (created by install.sh).
+HERMES_ROOT=/srv/hermes
+install -d -m 755 -o "$OP_USER" -g "$OP_USER" "$HERMES_ROOT"
+if [ "$STACK_DIR" != "$HERMES_ROOT/stack" ]; then
+  info "Copying stack to $HERMES_ROOT/stack"
+  rsync -a --delete --exclude .env "$STACK_DIR/" "$HERMES_ROOT/stack/"
+  [ -f "$STACK_DIR/.env" ] && [ ! -f "$HERMES_ROOT/stack/.env" ] && cp "$STACK_DIR/.env" "$HERMES_ROOT/stack/.env"
 fi
+chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT"
 
 # ── 3. Kernel / journald / time ──────────────────────────────────────────
 cat > /etc/sysctl.d/90-hardening.conf <<'SYSCTL'
@@ -318,6 +322,6 @@ Done. Next steps:
      The workspace is reachable only from your tailnet; TLS still works via DNS-01.
   2. Log in as the operator and start the stack:
        ssh -i ~/.ssh/hermes_vps $OP_USER@$TS_IP
-       cd ~/hermes-setup && sudo ./install.sh && sudo ./auth.sh
+       cd /srv/hermes/stack && sudo ./install.sh && sudo ./auth.sh
   3. If you run 'ufw reload' later, also run 'systemctl restart docker' (ufw flushes Docker's chains).
 MSG

@@ -182,6 +182,8 @@ hardening (`00-hermes-hardening.conf`: keys only, no root, `AllowUsers hermes`),
 unattended-upgrades (Ubuntu security/updates + `site=download.docker.com`,
 `site=pkgs.tailscale.com`, auto-reboot 04:30), fail2ban, sysctl, journald, Docker daemon.json.
 `WORKSPACE_HOST` DNS A record must point at the Tailscale IP (DNS-only). Compose unchanged.
+Layout: everything under `/srv/hermes` owned by `hermes` — `stack/` (this repo + `.env`),
+`data/`, `workspace/`, `traefik/`, `obsidian/`.
 
 ## Addendum 2026-09-16 — Obsidian Sync
 
