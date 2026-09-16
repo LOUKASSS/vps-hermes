@@ -48,7 +48,7 @@ apt-get update -q
 apt-get -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" full-upgrade
 apt-get install -y -q --no-install-recommends \
   ca-certificates curl gnupg lsb-release ufw unattended-upgrades apt-listchanges \
-  fail2ban needrestart openssh-server openssl rsync jq sudo
+  fail2ban needrestart openssh-server openssl rsync jq sudo git
 
 # ── 2. Operator user + SSH key ───────────────────────────────────────────
 if ! id "$OP_USER" >/dev/null 2>&1; then
@@ -85,9 +85,13 @@ fi
 HERMES_ROOT=/srv/hermes
 install -d -m 755 -o "$OP_USER" -g "$OP_USER" "$HERMES_ROOT"
 if [ "$STACK_DIR" != "$HERMES_ROOT/stack" ]; then
-  info "Copying stack to $HERMES_ROOT/stack"
-  rsync -a --delete --exclude .env "$STACK_DIR/" "$HERMES_ROOT/stack/"
-  [ -f "$STACK_DIR/.env" ] && [ ! -f "$HERMES_ROOT/stack/.env" ] && cp "$STACK_DIR/.env" "$HERMES_ROOT/stack/.env"
+  if [ -e "$HERMES_ROOT/stack/.git" ]; then
+    warn "$HERMES_ROOT/stack already exists — not overwritten. Update it with 'git pull' there, and re-run harden.sh from there next time."
+  else
+    info "Copying stack to $HERMES_ROOT/stack"
+    rsync -a --delete --exclude .env "$STACK_DIR/" "$HERMES_ROOT/stack/"
+    [ -f "$STACK_DIR/.env" ] && [ ! -f "$HERMES_ROOT/stack/.env" ] && cp "$STACK_DIR/.env" "$HERMES_ROOT/stack/.env"
+  fi
 fi
 chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT"
 
@@ -324,4 +328,6 @@ Done. Next steps:
        ssh -i ~/.ssh/hermes_vps $OP_USER@$TS_IP
        cd /srv/hermes/stack && sudo ./install.sh && sudo ./auth.sh
   3. If you run 'ufw reload' later, also run 'systemctl restart docker' (ufw flushes Docker's chains).
+  4. Tailscale admin console → this machine → "Disable key expiry". Otherwise the node key
+     expires after 180 days and, with SSH closed on the WAN, you are locked out.
 MSG

@@ -5,12 +5,14 @@
 #   backup.sh   → restic backups to Backblaze B2 (nightly timer)
 #   update.sh   → rebuild + pull + recreate (weekly timer)
 #   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
+#   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
 #
-# Topology:
-#   traefik ──proxy──▶ hermes-agent netns ─ :3000 hermes-workspace (public via Traefik)
-#                                          ├ :8642 gateway API (127.0.0.1 only)
-#                                          ├ :9119 dashboard (127.0.0.1 only, no auth gate)
-#                                          └ :9120 hermes-dashboard for Desktop (basic auth, tailnet)
+# Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
+#   traefik ──proxy──▶ hermes-agent netns ─ :3000 hermes-workspace (https://WORKSPACE_HOST)
+#      │                                   ├ :8642 gateway API (127.0.0.1 only)
+#      └─▶ docker-socket-proxy (read-only  ├ :9119 dashboard (127.0.0.1 only, no auth gate)
+#          view of the Docker API)         └ :9120 hermes-dashboard for Desktop (basic auth)
+#   orca :6768 (profile orca)   obsidian-sync (profile obsidian)
 #
 # hermes-workspace runs with network_mode: service:hermes-agent so it can reach the
 # loopback-only dashboard (its session token is scraped from the dashboard root HTML,
@@ -23,14 +25,69 @@ x-hermes-uid: &hermes-uid
   HERMES_GID: ${HERMES_GID:-1000}
   TZ: ${TZ:-UTC}
 
+# Log rotation per container (harden.sh sets the same in daemon.json, but only on Ubuntu).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
+  # Traefik only needs to *read* container labels. A raw docker.sock mount (even :ro) is full
+  # Docker API access = root on the host if Traefik is ever compromised; the proxy exposes GET
+  # on containers/networks/events/version only, on an internal network.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 64m
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      EVENTS: "1"
+      VERSION: "1"
+      PING: "1"
+      INFO: "1"
+      POST: "0"
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2375/_ping >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   traefik:
     image: traefik:v3.7
     container_name: traefik
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    depends_on:
+      - docker-socket-proxy
+    # Static config as flags only: Traefik reads ONE static source (file > CLI > env), so an
+    # acme.email flag next to --configfile would be ignored. traefik/traefik.yml documents it.
     command:
-      - --configfile=/etc/traefik/traefik.yml
+      - --api.dashboard=false
+      - --log.level=INFO
+      - --ping=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls.certresolver=cloudflare
+      - --providers.docker.endpoint=tcp://docker-socket-proxy:2375
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
       - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.cloudflare.acme.storage=/acme/acme.json
+      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53
     environment:
       CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
       TZ: ${TZ:-UTC}
@@ -38,11 +95,10 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ${TRAEFIK_DIR:-/srv/hermes/traefik}/acme.json:/acme/acme.json
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - proxy
+      - docker-api
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
@@ -56,6 +112,7 @@ services:
     image: hermes-agent-vps:latest
     container_name: hermes-agent
     restart: unless-stopped
+    logging: *logging
     command: ["gateway", "run"]
     shm_size: 1g
     mem_limit: ${AGENT_MEM_LIMIT:-10g}
@@ -98,6 +155,8 @@ services:
     image: ghcr.io/outsourc-e/hermes-workspace:latest
     container_name: hermes-workspace
     restart: unless-stopped
+    logging: *logging
+    mem_limit: ${WORKSPACE_MEM_LIMIT:-3g}
     network_mode: "service:hermes-agent"
     depends_on:
       hermes-agent:
@@ -142,6 +201,8 @@ services:
     pull_policy: never   # built by the hermes-agent service
     container_name: hermes-dashboard
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 1g
     init: true
     network_mode: "service:hermes-agent"
     pid: "container:hermes-agent"
@@ -175,9 +236,13 @@ services:
     build:
       context: ./obsidian
       pull: true
+      args:
+        OBSIDIAN_HEADLESS_VERSION: ${OBSIDIAN_HEADLESS_VERSION:-latest}
     image: obsidian-sync:latest
     container_name: obsidian-sync
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 1g
     profiles: ["obsidian"]
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
     environment:
@@ -203,11 +268,13 @@ services:
     image: orca-server:latest
     container_name: orca
     restart: unless-stopped
+    logging: *logging
     profiles: ["orca"]
     init: true
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
     shm_size: 1g
     mem_limit: ${ORCA_MEM_LIMIT:-3g}
+    cpus: ${ORCA_CPUS:-2}
     # ORCA_PAIRING is "" (desktop/runtime link) or "--mobile-pairing" (auth.sh orca mobile).
     command: ["sh", "-c", "exec orca serve --port 6768 --pairing-address ${DESKTOP_BIND:-127.0.0.1} ${ORCA_PAIRING:-}"]
     environment:
@@ -229,3 +296,6 @@ services:
 networks:
   proxy:
     name: proxy
+  docker-api:
+    name: docker-api
+    internal: true

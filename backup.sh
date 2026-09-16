@@ -68,7 +68,7 @@ do_setup() {
   │    RESTIC_REPOSITORY=$(env_val RESTIC_REPOSITORY)
   │    RESTIC_PASSWORD=$(env_val RESTIC_PASSWORD)
   │    B2_ACCOUNT_ID=$(env_val B2_ACCOUNT_ID)
-  │    B2_ACCOUNT_KEY=<the key you just entered>
+  │    B2_ACCOUNT_KEY=$(env_val B2_ACCOUNT_KEY)
   └──────────────────────────────────────────────────────────────────────────┘
 
   First backup: sudo $0 run      Status later: journalctl -u hermes-backup
@@ -77,8 +77,7 @@ MSG
 
 do_run() {
   require_configured
-  exec 9>/tmp/hermes-backup.lock
-  flock -n 9 || die "another backup is running"
+  lock_stack -n || die "another backup.sh or update.sh is running"
 
   # 1. Consistent application-level snapshot (sqlite backup API for state.db), kept under
   #    $HERMES_DATA_DIR/backups so `hermes import <zip>` works on any Hermes install.
@@ -118,9 +117,9 @@ Restored under $target. To put it back in place with the stack stopped:
   rsync -a $target$OBSIDIAN_DIR/ $OBSIDIAN_DIR/
   cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && chmod 600 $TRAEFIK_DIR/acme.json
   cp $target$STACK_DIR/.env $STACK_DIR/.env
-  chown -R $HERMES_UID:$HERMES_GID $HERMES_DATA_DIR $HERMES_WORKSPACE_DIR $OBSIDIAN_DIR $TRAEFIK_DIR
-  docker compose --project-directory $STACK_DIR up -d
-Alternative (Hermes state only, into a running agent): hermes import /opt/data/backups/hermes-backup-<ts>.zip
+  $STACK_DIR/install.sh          # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
+  rm -rf $target                 # it holds every secret in clear
+Alternative (Hermes state only, into a running agent): sudo ./auth.sh shell → hermes import /opt/data/backups/hermes-backup-<ts>.zip
 MSG
 }
 

@@ -31,11 +31,14 @@ load_env() {
   export RESTIC_REPOSITORY RESTIC_IMAGE
 }
 
-# set_env KEY VALUE — write/replace KEY in .env
+# set_env KEY VALUE — write/replace KEY in .env (VALUE is stored literally: no quoting, one line)
 set_env() {
-  local key="$1" val="$2"
+  local key="$1" val="$2" esc
+  case "$val" in *$'\n'*) die "set_env $key: value must be a single line" ;; esac
   if grep -q "^${key}=" "$STACK_DIR/.env"; then
-    sed -i "s|^${key}=.*|${key}=${val}|" "$STACK_DIR/.env"
+    # escape what sed would interpret in the replacement: \, & and our | delimiter
+    esc="${val//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//|/\\|}"
+    sed -i "s|^${key}=.*|${key}=${esc}|" "$STACK_DIR/.env"
   else
     printf '%s=%s\n' "$key" "$val" >> "$STACK_DIR/.env"
   fi
@@ -60,6 +63,36 @@ ask() {
 
 compose() {
   docker compose --project-directory "$STACK_DIR" "$@"
+}
+
+# Locks (flock on fd 9 / fd 8). STACK_LOCK serialises backup.sh and update.sh (they both touch the
+# containers and the data dir); UPDATE_LOCK is held by update.sh only, heal.sh skips while it is
+# held so it does not fight a recreate in progress.
+STACK_LOCK=/tmp/hermes-stack.lock
+UPDATE_LOCK=/tmp/hermes-update.lock
+# lock_stack [-n|-w <secs>] — fd 9
+lock_stack() { exec 9>"$STACK_LOCK"; flock "${@:--w 10800}" 9; }
+# lock_update [-n] — fd 8
+lock_update() { exec 8>"$UPDATE_LOCK"; flock "${@:--n}" 8; }
+
+# Files that switch the automation off:
+#   .maintenance  → heal.sh does nothing (touch it before `docker compose stop <service>`)
+#   .update-hold  → update.sh (timer) does nothing; written by `update.sh rollback`
+# shellcheck disable=SC2034  # used by heal.sh / update.sh / auth.sh
+MAINTENANCE_FLAG="$STACK_DIR/.maintenance"
+# shellcheck disable=SC2034
+UPDATE_HOLD="$STACK_DIR/.update-hold"
+
+# Resolve ORCA_VERSION=latest to the current release tag (GitHub API) and export it, so the
+# orca image only rebuilds when a new Orca release exists (the tag is a build arg / cache key).
+# Silently keeps "latest" when GitHub is unreachable (the Dockerfile then downloads the latest asset).
+orca_resolve_version() {
+  case "${ORCA_VERSION:-latest}" in latest|"")
+    local tag
+    tag="$(curl -fsSL --max-time 20 https://api.github.com/repos/stablyai/orca/releases/latest 2>/dev/null \
+      | sed -n 's/^  *"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+    [ -n "$tag" ] && export ORCA_VERSION="$tag" && info "Orca: latest release is $tag" ;;
+  esac
 }
 
 # enable_profile <name> — add a compose profile to COMPOSE_PROFILES in .env (comma list) + export it.
@@ -105,11 +138,13 @@ restic_run() {
     "$RESTIC_IMAGE" "$@"
 }
 
-# Recreate hermes-agent (new /opt/data/.env, new image…). A plain `restart` would leave the
-# containers sharing its netns (workspace, dashboard) in the orphaned namespace; `up -d
-# --force-recreate` recreates the dependants too.
+# Recreate hermes-agent (new /opt/data/.env, new image…) together with the containers that share
+# its namespaces: a plain `restart` (or recreating hermes-agent alone) leaves hermes-workspace in
+# the orphaned netns and kills hermes-dashboard (shared PID ns). Compose orders them itself
+# (depends_on: service_healthy).
+AGENT_GROUP=(hermes-agent hermes-workspace hermes-dashboard)
 restart_agent() {
-  compose up -d --force-recreate hermes-agent
+  compose up -d --force-recreate "${AGENT_GROUP[@]}"
   wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
 }
 

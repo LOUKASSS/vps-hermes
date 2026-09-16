@@ -11,8 +11,11 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
-[ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d"
+# Everything but obsidian/orca runs inside the agent container.
+case "${1:-}" in 8|obsidian|9|orca) ;; *)
+  running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
+  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
+esac
 
 do_hermes() {
   info "Hermes model provider — pick 'Anthropic' (Claude Max OAuth), 'ChatGPT or Codex Subscription', or 'xAI Grok OAuth (SuperGrok / Premium+)'."
@@ -39,7 +42,7 @@ do_claude_token() {
     else
       printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$tok" >> "$envf"
     fi
-    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent"
+    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard"
   fi
 }
 
@@ -76,7 +79,7 @@ do_messaging() {
   read -r -p "Recreate the gateway now to apply the new platforms? [Y/n] " a
   case "${a:-y}" in
     [yY]*) restart_agent ;;
-    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent" ;;
+    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard" ;;
   esac
 }
 
@@ -90,6 +93,9 @@ do_status() {
     echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
     echo; echo "── messaging ──"; hermes gateway status 2>&1 | head -n 20 || true
 '
+  echo; echo "── updates ──"
+  if [ -e "$UPDATE_HOLD" ]; then echo "ON HOLD since $(cat "$UPDATE_HOLD") (after a rollback) — sudo $STACK_DIR/update.sh resume"; else echo "automatic (Sunday 03:30)"; fi
+  [ -e "$MAINTENANCE_FLAG" ] && echo "heal.sh PAUSED ($MAINTENANCE_FLAG exists)"
   echo; echo "── backups ──"
   if [ -n "${RESTIC_PASSWORD:-}" ]; then
     echo "repository: ${RESTIC_REPOSITORY}"
@@ -154,13 +160,15 @@ do_orca() {
   info "Orca remote server on ${DESKTOP_BIND}:6768, same /workspace + CLI logins as the agent."
   set_env ORCA_PAIRING "$pairing"; export ORCA_PAIRING="$pairing"
   enable_profile orca
+  orca_resolve_version
   compose build orca
   compose up -d orca
   info "Waiting for Orca (up to 2 min)…"
   wait_healthy orca 120 || { compose logs --tail=30 orca; die "orca not healthy"; }
   local url web
-  url="$(compose logs --no-log-prefix orca 2>/dev/null | grep -o 'orca://pair[^ ]*' | tail -n1)"
-  web="$(compose logs --no-log-prefix orca 2>/dev/null | grep -o 'http://[^ ]*web-index.html[^ ]*' | tail -n1)"
+  # `{ grep || true; }`: under pipefail a grep without match would silently abort the script.
+  url="$(compose logs --no-log-prefix orca 2>/dev/null | { grep -o 'orca://pair[^ ]*' || true; } | tail -n1)"
+  web="$(compose logs --no-log-prefix orca 2>/dev/null | { grep -o 'http://[^ ]*web-index.html[^ ]*' || true; } | tail -n1)"
   # Mobile mode prints a QR (ANSI block art) between "Mobile pairing QR:" and "Pairing URL:".
   compose logs --no-log-prefix orca 2>/dev/null | sed -n '/pairing QR:/I,/^Pairing URL:/{/^Pairing URL:/!p}' | tail -n 60 || true
   cat <<MSG

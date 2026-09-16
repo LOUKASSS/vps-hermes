@@ -246,3 +246,47 @@ for `HERMES_UID`. Runs as `HERMES_UID` with `HOME=/opt/data/home` → same CLI l
 [desktop|mobile]` sets it, `up -d` (recreate), waits healthy and extracts the link / QR from the
 logs. `enable_profile` helper makes `COMPOSE_PROFILES` a comma list (obsidian + orca).
 Verified locally: healthy, ~160 MB RSS idle, browser client served, CLIs + creds visible.
+
+## Addendum — review fixes (2026-09-16)
+
+Four-angle review (security, shell, docker/ops, docs). Changes:
+
+- **Main body now stale where it says**: "Debian/Ubuntu, one script" (Ubuntu-only `harden.sh`,
+  five scripts); `mem_limit 4g / cpus 2` (10g / 6); owner "SUDO_UID or 1000" (uid of `hermes`
+  when it exists, always re-derived); `install.sh` steps (also DESKTOP_*, timers, obsidian dir,
+  `terminal.cwd`, no OS check); `status → hermes auth status` (`hermes auth list`); "Out of scope:
+  messaging, backups" (both in; monitoring/alerting still out); "Compose unchanged".
+- **Traefik → Docker API through `tecnativa/docker-socket-proxy`** (GET containers/networks/
+  events/version only, internal network `docker-api`). A `:ro` socket mount does not limit API
+  calls; a compromised Traefik would have been root on the host.
+- **Log rotation in compose** (`x-logging`, json-file 20m×5) — daemon.json only exists after
+  `harden.sh` (Ubuntu). **Memory limits** on every service (traefik 256m, workspace
+  `WORKSPACE_MEM_LIMIT` 3g, dashboard 1g, obsidian 1g, proxy 64m, orca `ORCA_CPUS` 2).
+- **`update.sh` rollback**: tags every image in use `:previous` before pulling/building, waits
+  for `hermes-agent` + `hermes-workspace` health, otherwise rolls back and writes `.update-hold`
+  (timer skips until `update.sh resume` / `--force`). `update.sh rollback` by hand. Also pulls
+  the restic image (was frozen at first use) and caps the build cache (4 GB).
+- **Orca**: two-stage Dockerfile; the download stage verifies the AppImage sha512 from the
+  release's `latest-linux.yml` and is cached by `ORCA_VERSION`; `orca_resolve_version` turns
+  `latest` into the current GitHub tag (update.sh, auth.sh orca) so the image rebuilds when a
+  release ships, not when the base image moves.
+- **heal.sh**: `hermes-agent` unhealthy/stopped → `restart_agent` (never a plain
+  `docker restart`); pauses on `.maintenance`; skips while update.sh holds `UPDATE_LOCK`.
+- **Locks**: `STACK_LOCK` serialises backup.sh and update.sh (systemd `After=` does not);
+  update waits up to 3 h (unit timeout 4 h).
+- **install.sh**: no more `chown -R` of the checkout (`.git` owned by a non-root uid breaks
+  root's git); credential dirs 700; `DESKTOP_BIND` kept when set by hand; `HERMES_UID` always
+  from `id hermes`. **harden.sh**: installs `git`, never overwrites an existing
+  `/srv/hermes/stack`, tells to disable Tailscale key expiry.
+- **set_env** escapes `\`, `&`, `|` (sed replacement) and refuses multi-line values.
+  **auth.sh**: `grep` in `$(…)` guarded (`pipefail` killed the script silently when the Orca
+  pairing link was not logged yet); `obsidian`/`orca` no longer require a running agent.
+- README: DR procedure fixed (Docker + `.env` must exist before `backup.sh restore`), `pip
+  install --user` replaced by `uv pip install --python /opt/hermes/.venv/bin/python` (no pip in
+  the image), prerequisites (Ubuntu, 8 vCPU/16 GB, no inbound port), Tailscale key expiry,
+  rotating secrets, uninstall, logs, no-monitoring statement.
+- **Traefik static config moved to compose `command:` flags, `traefik/traefik.yml` removed.**
+  Found during the review smoke test: Traefik loads a single static source (file > CLI > env),
+  so `--certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}` next to `--configfile` was
+  ignored and Let's Encrypt was asked with the `placeholder@example.com` from the file → "contact
+  email has forbidden domain" → no certificate ever. Same settings, one source.

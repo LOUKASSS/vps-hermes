@@ -1,4 +1,13 @@
 .env
+.env.*
+!.env.example
 *.local
 *.local-test
 acme.json
+.claude/
+.maintenance
+.update-hold
+.images.previous
+*.zip
+restore/
+hermes-ssh/

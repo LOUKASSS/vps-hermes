@@ -44,25 +44,31 @@ _key="$(env_val API_SERVER_KEY)"
 [ -n "$(env_val DESKTOP_PASSWORD)" ] || set_env DESKTOP_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_SECRET)" ]   || set_env DESKTOP_SECRET "$(openssl rand -base64 32 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_USERNAME)" ] || set_env DESKTOP_USERNAME admin
-# Publish the Desktop backend on the Tailscale IP only when the VPS is on a tailnet.
+# Publish the Desktop backend / Orca on the Tailscale IP when the VPS is on a tailnet. A value
+# you set yourself (anything but empty/loopback/a stale Tailscale IP) is kept.
 TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
+cur_bind="$(env_val DESKTOP_BIND)"
 if [ -n "$TS_IP" ]; then
-  set_env DESKTOP_BIND "$TS_IP"
+  case "$cur_bind" in
+    ""|127.0.0.1|100.*) set_env DESKTOP_BIND "$TS_IP" ;;
+    "$TS_IP") ;;
+    *) warn "DESKTOP_BIND=$cur_bind kept (Tailscale IP is $TS_IP)" ;;
+  esac
 else
-  [ -n "$(env_val DESKTOP_BIND)" ] || set_env DESKTOP_BIND 127.0.0.1
+  [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
   warn "No Tailscale IP found: Desktop backend (9120) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 
-# Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh if present,
-# else the user who invoked sudo, else 1000.
+# Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
+# its uid can differ on a rebuilt VPS), else the user who invoked sudo, else 1000.
 if id hermes >/dev/null 2>&1; then
-  owner_uid="$(id -u hermes)"; owner_gid="$(id -g hermes)"
+  set_env HERMES_UID "$(id -u hermes)"; set_env HERMES_GID "$(id -g hermes)"
 else
   owner_uid="${SUDO_UID:-1000}"; owner_gid="${SUDO_GID:-1000}"
   [ "$owner_uid" -eq 0 ] && { owner_uid=1000; owner_gid=1000; }
+  [ "$(env_val HERMES_UID)" != "1000" ] && [ -n "$(env_val HERMES_UID)" ] || set_env HERMES_UID "$owner_uid"
+  [ "$(env_val HERMES_GID)" != "1000" ] && [ -n "$(env_val HERMES_GID)" ] || set_env HERMES_GID "$owner_gid"
 fi
-[ "$(env_val HERMES_UID)" != "1000" ] && [ -n "$(env_val HERMES_UID)" ] || set_env HERMES_UID "$owner_uid"
-[ "$(env_val HERMES_GID)" != "1000" ] && [ -n "$(env_val HERMES_GID)" ] || set_env HERMES_GID "$owner_gid"
 
 load_env
 
@@ -71,9 +77,11 @@ info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${O
 mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
 touch "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
 chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
-# The stack dir (this repo, incl. .env) belongs to the operator too, so `docker compose` works
-# without sudo for the operator (docker group) and .env stays readable by them only.
-chown -R "$HERMES_UID:$HERMES_GID" "$STACK_DIR"
+# Credentials live here (OAuth tokens under data/home, Obsidian login under obsidian/): owner only.
+chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_DIR"
+# .env belongs to the operator (harden.sh already made them own the whole checkout, so day-to-day
+# `docker compose` / `git pull` work without sudo). The rest of the repo is deliberately left
+# alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
 # ── 4. Build + start ─────────────────────────────────────────────────────
@@ -121,8 +129,10 @@ cat <<MSG
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
   Backups       : ${backup_note}
-  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — manual: sudo ./update.sh
-  Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited)
+  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — manual: sudo ./update.sh; undo: sudo ./update.sh rollback
+  Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited; touch .maintenance to pause)
+
+  These secrets are also in .env (mode 600). Clear this terminal's scrollback if it is shared or logged.
 
 Next: configure model providers, CLI logins and messaging with your subscriptions:
 

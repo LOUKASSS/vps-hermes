@@ -8,9 +8,9 @@ weekly auto-updates, a self-healing timer, and an optional [Orca](https://www.on
 server to drive the same CLIs on the same projects yourself, from desktop or phone.
 
 ```
-Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (public, password)
-                                             ├ :8642 gateway API   (127.0.0.1 only)
-                                             ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
+Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (https://WORKSPACE_HOST, password)
+                    │                        ├ :8642 gateway API   (127.0.0.1 only)
+                    └▶ docker-socket-proxy   ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
 Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
 Tailnet ──6768──▶ orca (optional: claude/codex/grok yourself, from the Orca desktop/mobile app)
 
@@ -24,13 +24,18 @@ Tailnet ──6768──▶ orca (optional: claude/codex/grok yourself, from the
 
 `hermes-workspace` shares the agent container's network namespace, so the dashboard and the
 gateway API stay loopback-only (no auth gate, no exposure) while the workspace still reaches
-them. Only `https://<WORKSPACE_HOST>` is published.
+them. Nothing is reachable from the Internet once `harden.sh` ran: Traefik, the Desktop backend
+and Orca answer on the tailnet only. Traefik reads container labels through
+`docker-socket-proxy` (GET-only view of the Docker API) instead of the raw socket.
 
 ## Prerequisites
 
-- Fresh Debian 12+ / Ubuntu 22.04+ VPS (2 vCPU, 4 GB RAM recommended), root or sudo, ports 80/443 open.
-- DNS record `<WORKSPACE_HOST>` → VPS IP, in a Cloudflare zone.
+- Fresh **Ubuntu 22.04+** VPS (`harden.sh` is Ubuntu-only; the stack itself also runs on Debian 12+,
+  without the isolation), root or sudo. Sized for **8 vCPU / 16 GB** with the defaults
+  (`AGENT_MEM_LIMIT=10g`, `AGENT_CPUS=6`; lower them for a smaller box). No inbound port needed.
+- A Cloudflare zone for `<WORKSPACE_HOST>` (the A record is created after `harden.sh`, see below).
 - Cloudflare API token with **Zone → DNS → Edit** on that zone.
+- A Tailscale account (the VPS, your laptop and phone join the same tailnet).
 - The subscriptions you want to use: Claude **Max** (Anthropic OAuth needs Max + extra usage credits; Pro is not supported), ChatGPT Plus/Pro (Codex), SuperGrok / X Premium+.
 
 ## Install
@@ -42,6 +47,7 @@ Run once as root on the fresh VPS, before the stack:
 ```bash
 git clone <this repo> hermes-setup && cd hermes-setup
 sudo ./harden.sh                 # TS_AUTHKEY=tskey-... sudo ./harden.sh  for non-interactive Tailscale join
+                                 # HARDEN_ASSUME_YES=1 skips the lockout check (only if you verified Tailscale SSH yourself)
 ```
 
 What it does:
@@ -63,8 +69,14 @@ What it does:
   rotation), `/srv/hermes` owned by `hermes` with a copy of this repo in `/srv/hermes/stack`.
 
 Then in Cloudflare create the A record `<WORKSPACE_HOST>` → **Tailscale IP (100.x.y.z)**, DNS-only
-(grey cloud). The workspace is only reachable from your tailnet; TLS still works because DNS-01
-needs no inbound port.
+(grey cloud — proxied cannot reach a 100.x address). The workspace is only reachable from your
+tailnet; TLS still works because DNS-01 needs no inbound port.
+
+In the Tailscale admin console, open the machine and **Disable key expiry**: with SSH closed on
+the WAN, an expired node key (180 days by default) means a trip through the provider's console.
+
+Re-running `harden.sh` later: from `/srv/hermes/stack` (`sudo /srv/hermes/stack/harden.sh`), not
+from the original clone — an existing `/srv/hermes/stack` is never overwritten.
 
 ### 1. Stack
 
@@ -75,14 +87,21 @@ sudo ./install.sh     # installs Docker if needed, asks host / email / CF token,
 sudo ./auth.sh        # OAuth logins (menu)
 ```
 
-`install.sh` is idempotent. It writes `.env` (secrets generated: `API_SERVER_KEY`,
-`HERMES_PASSWORD`), creates `/srv/hermes/*` owned by `hermes` (fallback: the invoking `SUDO_UID`),
-builds the derived image, starts the stack, and sets the agent's working directory to `/workspace`.
-Everything under `/srv/hermes` belongs to `hermes`, so day-to-day `docker compose …` from
-`/srv/hermes/stack` works without sudo (docker group).
+`install.sh` is idempotent. It writes `.env` (generated secrets: `API_SERVER_KEY`,
+`HERMES_PASSWORD`, `DESKTOP_PASSWORD`, `DESKTOP_SECRET`), creates `/srv/hermes/*` owned by `hermes`
+(fallback: the invoking `SUDO_UID`; credential dirs are mode 700), sets `DESKTOP_BIND` to the
+Tailscale IP, builds the derived image, starts the stack, installs the systemd timers and sets
+the agent's working directory to `/workspace`. Everything under `/srv/hermes` belongs to `hermes`,
+so day-to-day `docker compose …` and `git pull` from `/srv/hermes/stack` work without sudo
+(docker group; do not `sudo git pull` — root's git refuses a repo it does not own).
+
+Re-running it after changes is the normal way to apply them; it recreates `hermes-agent` (and
+the containers sharing its namespaces), so running sessions restart. It keeps a `DESKTOP_BIND`
+you set by hand and always re-derives `HERMES_UID/GID` from the `hermes` user.
 
 Open `https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
-stored in `.env`).
+stored in `.env`). The install summary prints secrets: clear the scrollback if the terminal is
+shared or recorded.
 
 ## Auth: subscriptions instead of API keys
 
@@ -96,11 +115,14 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `codex` | `codex login --device-auth` — Hermes imports `~/.codex/auth.json` automatically | `/srv/hermes/data/home/.codex/` |
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
 | `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
-| `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then recreates the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
-| `orca [desktop\|mobile]` | enables the `orca` profile, builds/starts the Orca remote server, prints the pairing link (or the mobile QR) | `/srv/hermes/data/home/.config/orca/` |
+| `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then offers to recreate the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
 | `obsidian` | `ob login` + `ob sync-setup --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
-| `status` | shows all of the above + backup timer | |
+| `orca [desktop\|mobile]` | enables the `orca` profile, builds/starts the Orca remote server, prints the pairing link (or the mobile QR) | `/srv/hermes/data/home/.config/orca/` |
+| `status` | shows all of the above + update hold / backup timer / orca / obsidian | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
+
+Menu numbers work as arguments too (`sudo ./auth.sh 9 mobile`). `obsidian` and `orca` do not
+need the agent container to be running; everything else does.
 
 Everything runs as the runtime user with `HOME=/opt/data/home`, which is the HOME Hermes gives
 its tool subprocesses inside Docker — so the agent's own `claude -p …`, `codex exec …`,
@@ -120,8 +142,9 @@ loopback bind rejects remote clients — hence two instances. `hermes-dashboard`
 `init: true` (no s6, no profile reconciler → no second gateway) and shares the agent's PID
 namespace for gateway-liveness detection.
 
-In the app: **Settings → Gateways → Remote gateway** → `http://<tailscale-ip>:9120` → **Sign in**
-with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` from `.env` (printed at the end of `install.sh`).
+In the app: **Settings → Gateways → Remote gateway** → `http://<tailscale-ip>:9120` (port =
+`DESKTOP_PORT`) → **Sign in** with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` from `.env` (printed at
+the end of `install.sh`).
 `DESKTOP_SECRET` keeps you signed in across restarts. Check the gate:
 `curl -s http://<tailscale-ip>:9120/api/status | jq '.auth_required, .auth_providers'` → `true`, `["basic"]`.
 
@@ -148,8 +171,14 @@ Orca prints one pairing link per run (runtime link by default, mobile-scoped wit
 device is fine. The printed browser URL (`http://<tailscale-ip>:6768/web-index.html#pairing=…`)
 also works from any browser on the tailnet. Treat links like passwords; revoke under Shared
 Server Access in the app. Orca state (projects, pairings, secrets — unencrypted, no keyring in
-the container) lives in `data/home/.config/orca` and is part of the backups. Pin a release with
-`ORCA_VERSION=vX.Y.Z` in `.env`; `update.sh` rebuilds on it.
+the container) lives in `data/home/.config/orca` and is part of the backups.
+
+Versions: with `ORCA_VERSION=latest` (default) `update.sh` resolves the current GitHub release tag
+and rebuilds the image only when it changed; the AppImage's sha512 is checked against the
+release manifest (`latest-linux.yml`) in every build. Pin with `ORCA_VERSION=vX.Y.Z` in `.env`.
+Update Orca alone: `sudo ./auth.sh orca` (re-resolves, rebuilds, restarts). `DESKTOP_BIND` must
+be a private IP; `ORCA_ALLOW_PUBLIC=1 sudo ./auth.sh orca` overrides the refusal to bind
+`0.0.0.0` (only behind your own firewall).
 
 You and the Hermes agent share the files: Orca isolates its sessions in git worktrees, but
 nothing locks a plain checkout — keep agent work on branches/worktrees too.
@@ -171,10 +200,11 @@ No remote vault yet: `docker compose --profile obsidian run --rm obsidian-sync s
 
 ```bash
 sudo ./backup.sh setup       # bucket + application key → .env, generates RESTIC_PASSWORD, init, enables the nightly timer
-sudo ./backup.sh run         # what hermes-backup.timer runs at 03:00
+sudo ./backup.sh run         # what hermes-backup.timer runs at 03:00 — run the first one by hand, during the day
 sudo ./backup.sh snapshots
 sudo ./backup.sh restore latest /srv/restore
 sudo ./backup.sh check       # integrity (reads 5 % of the data)
+sudo ./backup.sh restic <args…>   # raw restic (unlock, ls, dump, key add…)
 journalctl -u hermes-backup  # history
 ```
 
@@ -188,21 +218,36 @@ uploads `data/`, `workspace/`, `obsidian/`, `traefik/acme.json` and `stack/.env`
 `node_modules`, venvs, caches, browser profiles.
 
 **Keep `RESTIC_PASSWORD`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` and `RESTIC_REPOSITORY` outside the
-VPS** (`setup` prints them). Without them the repository cannot be read.
+VPS** (`setup` prints all four). Without them the repository cannot be read. Never change
+`RESTIC_PASSWORD` by editing `.env` — that orphans the repository; use
+`sudo ./backup.sh restic key add` / `key remove`.
 
-Disaster recovery on a fresh VPS: `harden.sh` → clone this repo into `/srv/hermes/stack` → put
-those four values in `.env` → `sudo ./backup.sh restore latest /srv/restore` → follow the
-printed `rsync` lines (they put `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env` back) →
-`sudo ./install.sh`. All OAuth logins, memory, sessions and skills come back with `data/`.
-Hermes-only alternative into a running agent: `hermes import /opt/data/backups/<zip>`.
+Nothing alerts on a failed backup: check `sudo ./auth.sh status` or `journalctl -u hermes-backup`
+now and then.
+
+### Disaster recovery on a fresh VPS
+
+1. `sudo ./harden.sh` (puts this repo in `/srv/hermes/stack`), then as `hermes`:
+   `cd /srv/hermes/stack && cp .env.example .env` and add `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`,
+   `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`.
+2. `sudo ./install.sh` — installs Docker, asks host / email / CF token, starts an empty stack.
+3. `sudo ./backup.sh restore latest /srv/restore`, then `docker compose down` and the printed
+   `rsync`/`cp` lines (they put `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env` back).
+4. `sudo ./install.sh` again (re-chowns for this host's `hermes` uid, sets `DESKTOP_BIND`,
+   recreates), then `rm -rf /srv/restore` (it holds every secret in clear).
+
+All OAuth logins, memory, sessions and skills come back with `data/`. Hermes-only alternative
+into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backups/<zip>`.
 
 ## Files & Python
 
 - Put files in `/srv/hermes/workspace` on the VPS → visible as `/workspace` (agent cwd, workspace
   file browser + terminal).
-- Python 3.13 ships in the image; the agent runs scripts through its terminal tool. Extra
-  libraries: `sudo ./auth.sh shell` → `pip install --user <pkg>` (persists in `/opt/data/.local`,
-  already on PATH), or add them to `hermes/Dockerfile` and run `sudo ./update.sh`.
+- Python 3.13 ships in the image (venv `/opt/hermes/.venv`, no `pip`, `uv` is available); the
+  agent runs scripts through its terminal tool. Extra libraries: add a
+  `RUN uv pip install --python /opt/hermes/.venv/bin/python <pkg>` line to `hermes/Dockerfile` and
+  run `sudo ./update.sh`. The same command from `sudo ./auth.sh shell` works until the next image
+  rebuild.
 
 ## Operations
 
@@ -212,33 +257,87 @@ docker compose logs -f hermes-agent        # gateway + dashboard (s6-supervised)
 docker compose logs -f hermes-workspace
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
-sudo ./update.sh                            # rebuild on latest base image, pull, recreate
+sudo ./auth.sh status                       # logins, update hold, backup timer, orca, obsidian
+sudo ./update.sh                            # rebuild on latest base image, pull, recreate (auto-rollback if unhealthy)
+sudo ./update.sh rollback                   # back to the images that ran before the last update, and hold
+sudo ./update.sh resume                     # lift the hold
 sudo ./heal.sh                              # what hermes-heal.timer does every minute
 systemctl list-timers 'hermes-*'            # backup 03:00 daily, update Sun 03:30, heal every minute
 ```
 
-Timers (installed by `install.sh` from `systemd/`): `hermes-update.timer` runs `update.sh`
-every Sunday 03:30 (after the 03:00 backup, before the 04:30 unattended-upgrades reboot window);
-`hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks unhealthy and
-starts exited ones (Docker's own restart policy only reacts to a process exiting). It stays idle
-when nothing in the project runs (`docker compose down`/`stop` for maintenance).
+**Updates.** Images track `:latest` (agent base, workspace, restic, obsidian-headless, Orca
+release). `update.sh` first tags every running image `:previous`, then rebuilds/pulls and
+recreates; if `hermes-agent` or `hermes-workspace` are not healthy within a few minutes it rolls
+back to `:previous` on its own and writes `.update-hold`, which makes the weekly timer skip until
+`sudo ./update.sh resume` (or `--force`). `sudo ./update.sh rollback` does the same by hand — one
+step back only, the next update overwrites `:previous`. Disable auto-updates:
+`sudo systemctl disable --now hermes-update.timer`. Pin instead of `:latest`: `ORCA_VERSION`,
+`OBSIDIAN_HEADLESS_VERSION` in `.env`; the agent base and the workspace by editing
+`hermes/Dockerfile` `FROM` / the compose `image:` tag. Build cache is capped at 4 GB
+(`docker builder prune`); watch `df -h /var/lib/docker`.
 
-Restarting the agent: `docker compose up -d --force-recreate hermes-agent` (not `restart` —
+**Healing.** `hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks
+unhealthy, starts exited ones (Docker's own restart policy only reacts to a process exiting) and
+recreates `hermes-agent` with its dependants when it is the one unhealthy. It stays idle when
+nothing in the project runs (`docker compose down`), while `update.sh` runs, and while
+`/srv/hermes/stack/.maintenance` exists — **touch that file before `docker compose stop <service>`**,
+otherwise the service is back within a minute.
+
+**Restarting the agent:** `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` (not `restart` —
 `hermes-workspace` and `hermes-dashboard` live in its network namespace and must be recreated
 with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resource limits:
-`AGENT_MEM_LIMIT`, `AGENT_CPUS` in `.env`.
+`AGENT_MEM_LIMIT`, `AGENT_CPUS`, `WORKSPACE_MEM_LIMIT`, `ORCA_MEM_LIMIT`, `ORCA_CPUS` in `.env`;
+traefik/dashboard/obsidian have fixed limits in the compose file.
+
+**Updating these scripts:** `cd /srv/hermes/stack && git pull` (as `hermes`, no sudo) then
+`sudo ./install.sh`.
+
+**Logs.** `journalctl -u hermes-backup|hermes-update|hermes-heal|fail2ban`,
+`/var/log/unattended-upgrades/`, container logs via `docker compose logs` (json-file, 20 MB × 5
+per container). Traefik access log is off. There is no monitoring or alerting in this stack.
+
+### Rotating secrets
+
+| Secret | Then |
+|---|---|
+| `API_SERVER_KEY` | `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` |
+| `HERMES_PASSWORD` | `docker compose up -d --force-recreate hermes-workspace` |
+| `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-dashboard` |
+| `CF_DNS_API_TOKEN` | `docker compose up -d --force-recreate traefik` |
+| `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |
+| SSH key of `hermes` | `sudo /srv/hermes/stack/harden.sh --rotate-key` |
+| Orca pairings | revoke in the app (Shared Server Access) |
+| CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again |
+
+Changing `WORKSPACE_HOST`: edit `.env`, create the new DNS record, `docker compose up -d
+--force-recreate traefik hermes-agent` (the router labels live on `hermes-agent`); the old
+certificate stays in `acme.json`, harmless.
+
+### Uninstall
+
+```bash
+sudo systemctl disable --now hermes-backup.timer hermes-update.timer hermes-heal.timer
+sudo rm /etc/systemd/system/hermes-* && sudo systemctl daemon-reload
+cd /srv/hermes/stack && docker compose --profile '*' down --remove-orphans
+docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps orca-server obsidian-sync
+sudo rm -rf /srv/hermes            # data + every secret
+```
+`harden.sh` leftovers if you want the host back to stock: `/etc/ufw/after*.rules` (HERMES block),
+`/etc/ssh/sshd_config.d/00-hermes-hardening.conf`, `/etc/sudoers.d/90-hermes`,
+`/etc/apt/apt.conf.d/52-hermes-unattended`, `/etc/fail2ban/jail.d/sshd.local`,
+`/etc/sysctl.d/90-hardening.conf`, `/etc/docker/daemon.json`, user `hermes`, Tailscale.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), orca (profile `orca`), obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), orca (profile `orca`), obsidian-sync (profile `obsidian`) |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
-| `orca/Dockerfile` | `FROM` the agent image + Electron headless libs + Xvfb + extracted Orca AppImage (`orca serve`) |
-| `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
+| `orca/Dockerfile` | stage 1 downloads + sha512-verifies + extracts the Orca AppImage; stage 2 = agent image + Electron headless libs + Xvfb (`orca serve`) |
+| traefik (compose `command:`) | static config as flags: 80→443 redirect, docker provider via `docker-socket-proxy`, `cloudflare` ACME resolver |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
-| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / upgrade |
+| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / upgrade with `:previous` rollback |
 | `backup.sh` / `heal.sh` | restic → B2 backups / self-healing |
 | `systemd/` | `hermes-backup`, `hermes-update`, `hermes-heal` service + timer templates |
 | `lib/common.sh` | shared helpers |
@@ -247,7 +346,8 @@ with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resourc
 ## Troubleshooting
 
 - **Locked out?** The 10-minute guard disables ufw if you never confirmed. Otherwise use the
-  provider's console: `ufw disable`, fix Tailscale, re-run `harden.sh`.
+  provider's console: `ufw disable`, fix Tailscale (expired node key? `tailscale up` again and
+  disable key expiry in the admin console), re-run `/srv/hermes/stack/harden.sh`.
 - **`ufw reload` broke the containers** — ufw flushes Docker's iptables chains:
   `systemctl restart docker`.
 
@@ -256,15 +356,23 @@ with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resourc
   emails.
 - **Workspace shows "Offline"** — inside the agent:
   `docker compose exec hermes-agent curl -s 127.0.0.1:8642/health` and
-  `… 127.0.0.1:9119/api/status`. If you changed `API_SERVER_KEY` in `.env`, recreate both
-  containers (`docker compose up -d --force-recreate`).
+  `… 127.0.0.1:9119/api/status`. If you changed `API_SERVER_KEY` in `.env`, recreate the agent
+  and its dependants (`docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard`).
 - **`[config-migrate] WARNING … predates version 12`** on first boot — benign; the image seeds
   the upstream example config and `hermes setup` / `hermes model` stamp the version.
 - **Permission denied under `/srv/hermes`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
-  directory owner; re-run `sudo ./install.sh`.
+  directory owner; re-run `sudo ./install.sh`. Right after an update this can also mean the
+  upstream image changed its uid handling: `sudo ./update.sh rollback`.
+- **Update broke something** — `sudo ./update.sh rollback` (previous images, timer on hold);
+  `journalctl -u hermes-update -n 100` for what happened. `sudo ./update.sh resume` when fixed.
+- **A service I stopped keeps coming back** — `heal.sh`: `touch /srv/hermes/stack/.maintenance`
+  first (remove it when done).
 - **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT` (default 10g / 6 CPUs, sized for an 8 vCPU / 16 GB VPS).
 - **Backup failed** — `journalctl -u hermes-backup -n 50`; `sudo ./backup.sh restic unlock` after
-  an interrupted run; `sudo ./backup.sh check` to verify the repository.
+  an interrupted run; `sudo ./backup.sh check` to verify the repository. A long first upload can
+  be cut by the 04:30 reboot window: run the first `backup.sh run` by hand.
+- **Workspace 404 / Traefik sees no router** — `docker compose logs docker-socket-proxy traefik`;
+  Traefik reaches the Docker API only through the proxy on the internal `docker-api` network.
 - **`hermes-dashboard` exited (137)** — expected right after an agent restart (shared PID
   namespace); `heal.sh` starts it again within a minute.
 - **Local testing without root** — `ALLOW_NON_ROOT=1 ./install.sh` with `HERMES_*_DIR` pointing at

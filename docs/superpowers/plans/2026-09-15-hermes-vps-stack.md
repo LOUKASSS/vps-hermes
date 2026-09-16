@@ -1,5 +1,10 @@
 # Hermes VPS Stack Implementation Plan
 
+> **Historical — executed 2026-09-15/16.** Several steps below are superseded (e.g. it still
+> says `docker compose restart hermes-agent`, `API_SERVER_HOST: 0.0.0.0`, `traefik:v3.5`,
+> `hermes/config.seed.yaml`, 3 services). Current behaviour: README.md and the spec's
+> "Deviations" + "Addendum" sections.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** One-command deployment of Hermes Agent + Hermes Workspace behind Traefik (Cloudflare DNS-01 TLS) on a fresh Debian/Ubuntu VPS, with subscription-OAuth CLIs (`claude`, `codex`, `grok`), `gh`, Python, and host-persistent storage.
