@@ -62,6 +62,13 @@ compose() {
   docker compose --project-directory "$STACK_DIR" "$@"
 }
 
+# enable_profile <name> — add a compose profile to COMPOSE_PROFILES in .env (comma list) + export it.
+enable_profile() {
+  local cur; cur="$(env_val COMPOSE_PROFILES)"
+  case ",$cur," in *",$1,"*) ;; *) cur="${cur:+$cur,}$1"; set_env COMPOSE_PROFILES "$cur" ;; esac
+  export COMPOSE_PROFILES="$cur"
+}
+
 # Interactive command inside the agent container, as the runtime user, with HOME set
 # to the tool-subprocess home so CLI credentials land where the agent's own tool calls
 # will find them (/opt/data/home/.claude, .codex, .grok, .config/gh).

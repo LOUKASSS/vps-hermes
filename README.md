@@ -4,13 +4,15 @@ Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace
 (HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
 subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar,
 host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
-weekly auto-updates and a self-healing timer.
+weekly auto-updates, a self-healing timer, and an optional [Orca](https://www.onorca.dev) remote
+server to drive the same CLIs on the same projects yourself, from desktop or phone.
 
 ```
 Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (public, password)
                                              ├ :8642 gateway API   (127.0.0.1 only)
                                              ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
 Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
+Tailnet ──6768──▶ orca (optional: claude/codex/grok yourself, from the Orca desktop/mobile app)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
 ├── stack/                   this repo: compose, scripts, .env
@@ -95,6 +97,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
 | `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
 | `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then recreates the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
+| `orca [desktop\|mobile]` | enables the `orca` profile, builds/starts the Orca remote server, prints the pairing link (or the mobile QR) | `/srv/hermes/data/home/.config/orca/` |
 | `obsidian` | `ob login` + `ob sync-setup --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
 | `status` | shows all of the above + backup timer | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
@@ -124,6 +127,32 @@ with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` from `.env` (printed at the end of 
 
 Username/password is the provider recommended by Hermes for VPN/tailnet access; for a
 public-internet backend Hermes recommends the Nous Portal OAuth provider instead — not needed here.
+
+## Orca remote server (optional)
+
+[Orca](https://www.onorca.dev/docs/remote-servers) lets you run Claude Code / Codex / Grok
+sessions yourself — parallel agents, worktrees, diff review — from the Orca desktop app or the
+mobile app, with the runtime on the VPS. Here it runs as the `orca` compose service, built on the
+agent image (`orca/Dockerfile`: Electron headless libs + Xvfb + the extracted AppImage), as the
+same UID with `HOME=/opt/data/home` — so it uses **the same CLI logins as the agent** (no second
+`claude`/`codex`/`grok`/`gh` login) and **the same `/workspace`** as the Hermes agent. Published on
+the Tailscale IP only (`${DESKTOP_BIND}:6768`).
+
+```bash
+sudo ./auth.sh orca            # desktop: paste the orca://pair?… link in Settings → Remote Orca Servers → Add Server
+sudo ./auth.sh orca mobile     # phone: scan the printed QR (phone on the tailnet)
+```
+
+Orca prints one pairing link per run (runtime link by default, mobile-scoped with
+`--mobile-pairing`); already-paired devices keep their tokens, so switching modes to add another
+device is fine. The printed browser URL (`http://<tailscale-ip>:6768/web-index.html#pairing=…`)
+also works from any browser on the tailnet. Treat links like passwords; revoke under Shared
+Server Access in the app. Orca state (projects, pairings, secrets — unencrypted, no keyring in
+the container) lives in `data/home/.config/orca` and is part of the backups. Pin a release with
+`ORCA_VERSION=vX.Y.Z` in `.env`; `update.sh` rebuilds on it.
+
+You and the Hermes agent share the files: Orca isolates its sessions in git worktrees, but
+nothing locks a plain checkout — keep agent work on branches/worktrees too.
 
 ## Obsidian vault (optional)
 
@@ -203,9 +232,10 @@ with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resourc
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), orca (profile `orca`), obsidian-sync (profile `obsidian`) |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
+| `orca/Dockerfile` | `FROM` the agent image + Electron headless libs + Xvfb + extracted Orca AppImage (`orca serve`) |
 | `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
 | `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / upgrade |

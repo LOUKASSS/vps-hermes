@@ -128,6 +128,7 @@ Next: configure model providers, CLI logins and messaging with your subscription
 
   sudo ./auth.sh
   sudo ./backup.sh setup     # Backblaze B2 backups (recommended before you rely on the agent)
+  sudo ./auth.sh orca        # optional: Orca remote server (claude/codex/grok yourself, desktop + phone)
 
 The certificate is issued on the first HTTPS request; give Traefik ~1 min once DNS points here.
 MSG

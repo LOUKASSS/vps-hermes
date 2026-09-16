@@ -230,3 +230,19 @@ Tailscale IP. `API_SERVER_KEY` is passed to it too, otherwise the bootstrap gene
   (persisted in `/opt/data/home/.gitconfig`). **`auth.sh messaging`** wraps
   `hermes gateway setup` (container-aware upstream: no service install) and recreates the agent
   with `compose up -d --force-recreate` — a plain `restart` orphans the netns-joined containers.
+
+## Addendum — Orca remote server (2026-09-16)
+
+Option B chosen over a host install: `orca` compose service (profile `orca`) built
+`FROM base` where `base` is the compose named context `service:hermes-agent` (so it reuses
+claude/codex/grok/gh/node/python/git and builds after the agent image). Adds the headless
+Electron matrix + Xvfb (Orca starts Xvfb :99 itself when `DISPLAY` is unset), the AppImage
+extracted to `/opt/orca` (no FUSE), `chrome-sandbox` setuid so no `--no-sandbox` is needed,
+`ENTRYPOINT []` to drop the agent image's s6 dispatcher (which refuses `--user`), a passwd entry
+for `HERMES_UID`. Runs as `HERMES_UID` with `HOME=/opt/data/home` → same CLI logins and
+`/workspace` as the agent; state in `data/home/.config/orca` (backed up). Published
+`${DESKTOP_BIND}:6768`, `--pairing-address ${DESKTOP_BIND}` (Tailscale IP). `ORCA_PAIRING`
+(`""` | `--mobile-pairing`) selects which single pairing link Orca prints; `auth.sh orca
+[desktop|mobile]` sets it, `up -d` (recreate), waits healthy and extracts the link / QR from the
+logs. `enable_profile` helper makes `COMPOSE_PROFILES` a comma list (obsidian + orca).
+Verified locally: healthy, ~160 MB RSS idle, browser client served, CLIs + creds visible.

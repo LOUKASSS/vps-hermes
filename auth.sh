@@ -4,7 +4,7 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | status | shell
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -102,8 +102,14 @@ do_status() {
   else
     echo "not configured (run: $STACK_DIR/backup.sh setup)"
   fi
+  echo; echo "── orca ──"
+  if [[ ",${COMPOSE_PROFILES:-}," == *,orca,* ]]; then
+    echo "server: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' orca 2>/dev/null || echo 'not created')  → ${DESKTOP_BIND:-?}:6768  (pairing link: $0 orca)"
+  else
+    echo "not enabled (run: $0 orca)"
+  fi
   echo; echo "── obsidian ──"
-  if [ "${COMPOSE_PROFILES:-}" = obsidian ]; then
+  if [[ ",${COMPOSE_PROFILES:-}," == *,obsidian,* ]]; then
     docker inspect -f 'sidecar: {{.State.Status}}' obsidian-sync 2>/dev/null || echo "sidecar: not created"
     compose --profile obsidian run --rm --no-deps -T obsidian-sync sync-status --path /vault 2>&1 || true
   else
@@ -125,14 +131,44 @@ do_obsidian() {
   info "No remote vault yet? Ctrl+C and run: docker compose --profile obsidian run --rm obsidian-sync sync-create-remote"
   obsidian_exec sync-setup --path /vault --device-name "hermes-vps"
   # Enable the sidecar profile persistently and start it.
-  if grep -q '^COMPOSE_PROFILES=' "$STACK_DIR/.env"; then
-    sed -i 's|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=obsidian|' "$STACK_DIR/.env"
-  else
-    printf 'COMPOSE_PROFILES=obsidian\n' >> "$STACK_DIR/.env"
-  fi
-  export COMPOSE_PROFILES=obsidian
+  enable_profile obsidian
   compose up -d obsidian-sync
   info "obsidian-sync started. Status: docker compose logs -f obsidian-sync  |  ./auth.sh status"
+}
+
+# auth.sh orca [desktop|mobile] — enable the Orca remote server, print the pairing link.
+# Orca prints ONE pairing link per run: the runtime link (desktop app) by default, or a
+# mobile-scoped QR/link with --mobile-pairing. Already-paired devices keep their own tokens, so
+# switching modes to pair another device is safe.
+do_orca() {
+  local mode="${1:-desktop}" pairing=""
+  case "$mode" in
+    desktop) pairing="" ;;
+    mobile)  pairing="--mobile-pairing" ;;
+    *) die "usage: $0 orca [desktop|mobile]" ;;
+  esac
+  info "Orca remote server on the Tailscale IP (${DESKTOP_BIND:-?}:6768), same /workspace + CLI logins as the agent."
+  set_env ORCA_PAIRING "$pairing"; export ORCA_PAIRING="$pairing"
+  enable_profile orca
+  compose build orca
+  compose up -d orca
+  info "Waiting for Orca (up to 2 min)…"
+  wait_healthy orca 120 || { compose logs --tail=30 orca; die "orca not healthy"; }
+  local url web
+  url="$(compose logs --no-log-prefix orca 2>/dev/null | grep -o 'orca://pair[^ ]*' | tail -n1)"
+  web="$(compose logs --no-log-prefix orca 2>/dev/null | grep -o 'http://[^ ]*web-index.html[^ ]*' | tail -n1)"
+  # Mobile mode prints a QR (ANSI block art) between "Mobile pairing QR:" and "Pairing URL:".
+  compose logs --no-log-prefix orca 2>/dev/null | sed -n '/pairing QR:/I,/^Pairing URL:/{/^Pairing URL:/!p}' | tail -n 60 || true
+  cat <<MSG
+
+  Mode          : $mode pairing   (other device type: sudo $0 orca $([ "$mode" = mobile ] && echo desktop || echo mobile))
+  Pairing link  : ${url:-<not found — docker compose logs orca>}
+  Browser client: ${web:-n/a}
+  Desktop app   : Settings → Remote Orca Servers → Add Server → paste the link
+  Mobile app    : scan the QR above / open the link on the phone (must be on the tailnet)
+
+Treat the link like a password (revocable under Shared Server Access in the app).
+MSG
 }
 
 do_shell() { agent_exec bash; }
@@ -142,7 +178,8 @@ run_target() {
     1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
     4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
     7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
-    9|status) do_status ;; 10|shell) do_shell ;;
+    9|orca) do_orca "${2:-desktop}" ;;
+    10|status) do_status ;; 11|shell) do_shell ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -160,8 +197,9 @@ Hermes stack — auth
   6) gh            GitHub CLI        (gh auth login --web + git identity)
   7) messaging     Telegram / Discord / Slack / WhatsApp… (hermes gateway setup)
   8) obsidian      Obsidian Sync     (ob login + ob sync-setup, starts the obsidian-sync sidecar)
-  9) status        Show login state
- 10) shell         Shell inside the agent container
+  9) orca          Orca remote server (claude/codex/grok from the Orca desktop/mobile app) — pairing link
+ 10) status        Show login state
+ 11) shell         Shell inside the agent container
   q) quit
 MENU
   read -r -p "> " choice
@@ -169,7 +207,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|status|shell]"
+  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|status|shell]"
 else
   while true; do menu; echo; done
 fi
