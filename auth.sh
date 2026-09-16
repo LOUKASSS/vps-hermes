@@ -4,7 +4,7 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | status | shell
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | obsidian | status | shell
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -64,7 +64,30 @@ do_status() {
     echo; echo "── claude ──"; claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
-    echo; echo "── gh ──"; gh auth status 2>&1 || true'
+    echo; echo "── gh ──"; gh auth status 2>&1 || true
+    echo; echo "── obsidian ──"; ob login 2>&1 </dev/null | head -1 || true; ob sync-list-local 2>&1 || true'
+}
+
+do_obsidian() {
+  local vault="/workspace/${OBSIDIAN_VAULT_DIR:-vault}"
+  info "Obsidian Sync headless client (requires an Obsidian Sync subscription)."
+  info "Vault path in the containers: $vault  (host: $HERMES_WORKSPACE_DIR/${OBSIDIAN_VAULT_DIR:-vault})"
+  agent_run mkdir -p "$vault"
+  agent_exec ob login
+  echo
+  info "Remote vaults:"; agent_run ob sync-list-remote || true
+  echo
+  info "Linking $vault to a remote vault (prompts for vault + E2E password; create one first with 'ob sync-create-remote' if needed)."
+  agent_exec ob sync-setup --path "$vault" --device-name "hermes-vps"
+  # Enable the sidecar profile persistently and start it.
+  if grep -q '^COMPOSE_PROFILES=' "$STACK_DIR/.env"; then
+    sed -i 's|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=obsidian|' "$STACK_DIR/.env"
+  else
+    printf 'COMPOSE_PROFILES=obsidian\n' >> "$STACK_DIR/.env"
+  fi
+  export COMPOSE_PROFILES=obsidian
+  compose up -d obsidian-sync
+  info "obsidian-sync started. Status: docker compose logs -f obsidian-sync  |  ./auth.sh status"
 }
 
 do_shell() { agent_exec bash; }
@@ -73,7 +96,8 @@ run_target() {
   case "$1" in
     1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
     4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
-    7|status) do_status ;; 8|shell) do_shell ;;
+    7|obsidian) do_obsidian ;;
+    8|status) do_status ;; 9|shell) do_shell ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -89,8 +113,9 @@ Hermes stack — auth
   4) codex         Codex CLI         (codex login --device-auth)
   5) grok          Grok CLI          (grok login --device-auth)
   6) gh            GitHub CLI        (gh auth login --web)
-  7) status        Show login state
-  8) shell         Shell inside the agent container
+  7) obsidian      Obsidian Sync    (ob login + ob sync-setup, starts the obsidian-sync sidecar)
+  8) status        Show login state
+  9) shell         Shell inside the agent container
   q) quit
 MENU
   read -r -p "> " choice
@@ -98,7 +123,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|status|shell]"
+  run_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|obsidian|status|shell]"
 else
   while true; do menu; echo; done
 fi

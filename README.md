@@ -2,7 +2,8 @@
 
 Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace) behind Traefik
 (HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
-subscriptions (no API keys), `gh`, Python 3.13, and host-persistent storage the agent can read/write.
+subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar, and
+host-persistent storage the agent can read/write.
 
 ```
 Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (public, password)
@@ -86,6 +87,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `codex` | `codex login --device-auth` — Hermes imports `~/.codex/auth.json` automatically | `/srv/hermes/data/home/.codex/` |
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
 | `gh` | `gh auth login --web` | `/srv/hermes/data/home/.config/gh/` |
+| `obsidian` | `ob login` + `ob sync-setup --path /workspace/<OBSIDIAN_VAULT_DIR>` (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the `obsidian-sync` sidecar (`ob sync --continuous`) | `/srv/hermes/data/home/.config/`, vault `.obsidian/` |
 | `status` | shows all of the above | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 
@@ -95,6 +97,16 @@ its tool subprocesses inside Docker — so the agent's own `claude -p …`, `cod
 
 Upstream notes: xAI OAuth can return `403` on some tiers (fallback: `XAI_API_KEY`); Codex plan
 quota semantics are not documented by Hermes.
+
+## Obsidian vault (optional)
+
+The agents write Markdown into `/workspace/<OBSIDIAN_VAULT_DIR>` (default `vault`, host
+`/srv/hermes/workspace/vault`). The `obsidian-sync` sidecar — same image, `ob sync --continuous`,
+same UID and HOME as the agent — is the **only** sync client on that vault and pushes/pulls it
+to your Obsidian Sync remote vault with end-to-end encryption. `sudo ./auth.sh obsidian` does
+the login and vault linking, then starts it. Manual checks from the agent container:
+`ob sync-status --path /workspace/vault`, `docker compose logs -f obsidian-sync`.
+Create a remote vault first if you have none: `sudo ./auth.sh shell` → `ob sync-create-remote`.
 
 ## Files & Python
 
@@ -122,8 +134,8 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace |
-| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
+| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, obsidian-sync (profile `obsidian`) |
+| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok`, `obsidian-headless` |
 | `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
 | `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins / upgrade |

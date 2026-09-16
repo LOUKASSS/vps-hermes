@@ -27,11 +27,12 @@ RUN npm install -g --no-audit --no-fund --fetch-retries=5 \
         --allow-scripts=@anthropic-ai/claude-code,@xai-official/grok \
         @anthropic-ai/claude-code \
         @openai/codex \
-        @xai-official/grok && \
+        @xai-official/grok \
+        obsidian-headless && \
     npm cache clean --force
 
 # Disable CLI self-updaters: the install tree is immutable and updates come from image rebuilds.
 ENV DISABLE_AUTOUPDATER=1 \
     CODEX_DISABLE_UPDATE_CHECK=1
 
-RUN gh --version && claude --version && codex --version && grok --version
+RUN gh --version && claude --version && codex --version && grok --version && ob --version

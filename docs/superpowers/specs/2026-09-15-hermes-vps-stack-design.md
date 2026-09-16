@@ -182,3 +182,12 @@ hardening (`00-hermes-hardening.conf`: keys only, no root, `AllowUsers hermes`),
 unattended-upgrades (Ubuntu security/updates + `site=download.docker.com`,
 `site=pkgs.tailscale.com`, auto-reboot 04:30), fail2ban, sysctl, journald, Docker daemon.json.
 `WORKSPACE_HOST` DNS A record must point at the Tailscale IP (DNS-only). Compose unchanged.
+
+## Addendum 2026-09-16 — Obsidian Sync
+
+`obsidian-headless` (`ob`, npm) baked into the derived image (Node already present). Sync runs
+in a dedicated `obsidian-sync` sidecar (same image, `ob sync --continuous --path
+/workspace/$OBSIDIAN_VAULT_DIR`, same UID + `HOME=/opt/data/home` so credentials under
+`~/.config` are shared with the agent container and persisted). Single sync client per vault.
+Compose profile `obsidian`, enabled by `auth.sh obsidian` after `ob login` + `ob sync-setup`.
+Chosen over a host install to keep the VPS Docker-only and ownership aligned.

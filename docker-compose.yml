@@ -111,6 +111,28 @@ services:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/home/workspace/.hermes
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
 
+  # Obsidian Sync headless client (npm obsidian-headless, `ob`) — keeps /workspace/<vault>
+  # in sync with your Obsidian Sync remote vault. Single sync client per vault: the agent only
+  # reads/writes files. Disabled until you log in: `sudo ./auth.sh obsidian` runs `ob login` +
+  # `ob sync-setup` with the same HOME and enables the `obsidian` compose profile.
+  obsidian-sync:
+    image: hermes-agent-vps:latest
+    container_name: obsidian-sync
+    restart: unless-stopped
+    profiles: ["obsidian"]
+    depends_on:
+      hermes-agent:
+        condition: service_started
+    entrypoint: ["ob"]
+    command: ["sync", "--continuous", "--path", "/workspace/${OBSIDIAN_VAULT_DIR:-vault}"]
+    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    environment:
+      HOME: /opt/data/home
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
+      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+
 networks:
   proxy:
     name: proxy
