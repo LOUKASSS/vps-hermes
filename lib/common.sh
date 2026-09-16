@@ -25,6 +25,7 @@ load_env() {
   set +a
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
   : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
+  : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}"
 }
 
 compose() {
@@ -41,6 +42,11 @@ agent_exec() {
 # Same, non-interactive (for scripts).
 agent_run() {
   compose exec -T -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w /workspace hermes-agent "$@"
+}
+
+# One-off command in the Obsidian sync image (same HOME volume as the sidecar), interactive.
+obsidian_exec() {
+  compose --profile obsidian run --rm --no-deps -it obsidian-sync "$@"
 }
 
 # wait_healthy <container> <seconds>

@@ -65,20 +65,29 @@ do_status() {
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
     echo; echo "── gh ──"; gh auth status 2>&1 || true
-    echo; echo "── obsidian ──"; ob login 2>&1 </dev/null | head -1 || true; ob sync-list-local 2>&1 || true'
+'
+  echo; echo "── obsidian ──"
+  if [ "${COMPOSE_PROFILES:-}" = obsidian ]; then
+    docker inspect -f 'sidecar: {{.State.Status}}' obsidian-sync 2>/dev/null || echo "sidecar: not created"
+    compose --profile obsidian run --rm --no-deps -T obsidian-sync sync-status --path /vault 2>&1 || true
+  else
+    echo "not configured (run: $0 obsidian)"
+  fi
 }
 
 do_obsidian() {
-  local vault="/workspace/${OBSIDIAN_VAULT_DIR:-vault}"
   info "Obsidian Sync headless client (requires an Obsidian Sync subscription)."
-  info "Vault path in the containers: $vault  (host: $HERMES_WORKSPACE_DIR/${OBSIDIAN_VAULT_DIR:-vault})"
-  agent_run mkdir -p "$vault"
-  agent_exec ob login
+  info "Vault: host $HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR  = agent /workspace/$OBSIDIAN_VAULT_DIR  = sync client /vault"
+  mkdir -p "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
+  chown "$HERMES_UID:$HERMES_GID" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
+  compose --profile obsidian build --pull obsidian-sync
+  obsidian_exec login
   echo
-  info "Remote vaults:"; agent_run ob sync-list-remote || true
+  info "Remote vaults:"; obsidian_exec sync-list-remote || true
   echo
-  info "Linking $vault to a remote vault (prompts for vault + E2E password; create one first with 'ob sync-create-remote' if needed)."
-  agent_exec ob sync-setup --path "$vault" --device-name "hermes-vps"
+  info "Linking /vault to a remote vault (prompts for vault + E2E password)."
+  info "No remote vault yet? Ctrl+C and run: docker compose --profile obsidian run --rm obsidian-sync sync-create-remote"
+  obsidian_exec sync-setup --path /vault --device-name "hermes-vps"
   # Enable the sidecar profile persistently and start it.
   if grep -q '^COMPOSE_PROFILES=' "$STACK_DIR/.env"; then
     sed -i 's|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=obsidian|' "$STACK_DIR/.env"

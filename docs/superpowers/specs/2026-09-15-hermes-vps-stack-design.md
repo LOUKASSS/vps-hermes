@@ -185,9 +185,9 @@ unattended-upgrades (Ubuntu security/updates + `site=download.docker.com`,
 
 ## Addendum 2026-09-16 — Obsidian Sync
 
-`obsidian-headless` (`ob`, npm) baked into the derived image (Node already present). Sync runs
-in a dedicated `obsidian-sync` sidecar (same image, `ob sync --continuous --path
-/workspace/$OBSIDIAN_VAULT_DIR`, same UID + `HOME=/opt/data/home` so credentials under
-`~/.config` are shared with the agent container and persisted). Single sync client per vault.
-Compose profile `obsidian`, enabled by `auth.sh obsidian` after `ob login` + `ob sync-setup`.
-Chosen over a host install to keep the VPS Docker-only and ownership aligned.
+Dedicated minimal image `obsidian/Dockerfile` (`node:22-bookworm-slim` + `obsidian-headless`,
+~350 MB) running `ob sync --continuous --path /vault` as `HERMES_UID`, `HOME=/data` mounted
+from `/srv/hermes/obsidian` (credentials isolated from the agent), vault bind-mounted from
+`/srv/hermes/workspace/$OBSIDIAN_VAULT_DIR`. The agent image does not ship `ob` (the agent only
+reads/writes vault files). Single sync client per vault. Compose profile `obsidian`, enabled by
+`auth.sh obsidian` after `ob login` + `ob sync-setup` run via `compose run` on the same image.
