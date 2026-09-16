@@ -126,7 +126,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 | `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
 
-Menu numbers work as arguments too (`sudo ./auth.sh 9 mobile`). `obsidian` and `orca` do not
+Menu numbers work as arguments too (`sudo ./auth.sh 9 mobile`). `obsidian`, `orca` and `dind off` do not
 need the agent container to be running; everything else does.
 
 Everything runs as the runtime user with `HOME=/opt/data/home`, which is the HOME Hermes gives

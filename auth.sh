@@ -11,11 +11,12 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-# Everything but obsidian/orca runs inside the agent container.
-case "${1:-}" in 8|obsidian|9|orca) ;; *)
+# Everything but obsidian/orca/dind runs inside the agent container.
+need_agent() {
   running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
-  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
-esac
+  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d"
+}
+case "${1:-}" in 8|obsidian|9|orca|13|dind) ;; *) need_agent ;; esac
 
 do_hermes() {
   info "Hermes model provider — pick 'Anthropic' (Claude Max OAuth), 'ChatGPT or Codex Subscription', or 'xAI Grok OAuth (SuperGrok / Premium+)'."
@@ -224,6 +225,7 @@ do_dind() {
     return 0
   fi
   [ -z "${1:-}" ] || die "usage: $0 dind [off]"
+  need_agent
   case "${DESKTOP_BIND:-}" in
     ""|0.0.0.0|"::") die "DESKTOP_BIND is '${DESKTOP_BIND:-unset}': the test ports would listen on every interface. Set it to the Tailscale IP first." ;;
   esac
