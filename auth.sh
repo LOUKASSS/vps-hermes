@@ -4,7 +4,7 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | status | shell
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | status | shell | chat
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -184,6 +184,9 @@ MSG
 }
 
 do_shell() { agent_exec bash; }
+# Interactive Hermes CLI in the agent container: same config, sessions and /workspace as the
+# gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
+do_chat() { shift; agent_exec hermes chat "$@"; }
 
 run_target() {
   case "$1" in
@@ -191,7 +194,7 @@ run_target() {
     4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
     7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
     9|orca) do_orca "${2:-desktop}" ;;
-    10|status) do_status ;; 11|shell) do_shell ;;
+    10|status) do_status ;; 11|shell) do_shell ;; 12|chat) do_chat "$@" ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -212,6 +215,7 @@ Hermes stack — auth
   9) orca          Orca remote server (claude/codex/grok from the Orca desktop/mobile app) — pairing link
  10) status        Show login state
  11) shell         Shell inside the agent container
+ 12) chat          Hermes CLI chat inside the agent container (hermes chat)
   q) quit
 MENU
   read -r -p "> " choice
@@ -219,7 +223,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|status|shell]"
+  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|status|shell|chat [hermes chat args]]"
 else
   while true; do menu; echo; done
 fi

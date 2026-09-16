@@ -120,6 +120,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `orca [desktop\|mobile]` | enables the `orca` profile, builds/starts the Orca remote server, prints the pairing link (or the mobile QR) | `/srv/hermes/data/home/.config/orca/` |
 | `status` | shows all of the above + update hold / backup timer / orca / obsidian | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
+| `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
 
 Menu numbers work as arguments too (`sudo ./auth.sh 9 mobile`). `obsidian` and `orca` do not
 need the agent container to be running; everything else does.
