@@ -2,8 +2,9 @@
 
 Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace) behind Traefik
 (HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
-subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar, and
-host-persistent storage the agent can read/write.
+subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar,
+host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
+weekly auto-updates and a self-healing timer.
 
 ```
 Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (public, password)
@@ -92,9 +93,10 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `claude-token` | `claude setup-token` → optionally stored as `CLAUDE_CODE_OAUTH_TOKEN` | `/srv/hermes/data/.env` |
 | `codex` | `codex login --device-auth` — Hermes imports `~/.codex/auth.json` automatically | `/srv/hermes/data/home/.codex/` |
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
-| `gh` | `gh auth login --web` | `/srv/hermes/data/home/.config/gh/` |
+| `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
+| `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then recreates the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
 | `obsidian` | `ob login` + `ob sync-setup --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
-| `status` | shows all of the above | |
+| `status` | shows all of the above + backup timer | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 
 Everything runs as the runtime user with `HOME=/opt/data/home`, which is the HOME Hermes gives
@@ -136,6 +138,35 @@ Obsidian credentials live in `/srv/hermes/obsidian`, outside the agent's HOME.
 sidecar. Checks: `sudo ./auth.sh status`, `docker compose logs -f obsidian-sync`.
 No remote vault yet: `docker compose --profile obsidian run --rm obsidian-sync sync-create-remote`.
 
+## Backups (Backblaze B2, restic)
+
+```bash
+sudo ./backup.sh setup       # bucket + application key → .env, generates RESTIC_PASSWORD, init, enables the nightly timer
+sudo ./backup.sh run         # what hermes-backup.timer runs at 03:00
+sudo ./backup.sh snapshots
+sudo ./backup.sh restore latest /srv/restore
+sudo ./backup.sh check       # integrity (reads 5 % of the data)
+journalctl -u hermes-backup  # history
+```
+
+B2: private bucket + an application key restricted to it (`listBuckets, listFiles, readFiles,
+writeFiles, deleteFiles`). restic (in a throwaway `restic/restic` container) encrypts client-side
+and deduplicates; retention 7 daily / 4 weekly / 6 monthly, prune on Sundays.
+
+Each run first takes `hermes backup` inside the agent (consistent `state.db` snapshot via the
+SQLite backup API, kept as `/srv/hermes/data/backups/hermes-backup-<ts>.zip`, 2 newest), then
+uploads `data/`, `workspace/`, `obsidian/`, `traefik/acme.json` and `stack/.env` — minus
+`node_modules`, venvs, caches, browser profiles.
+
+**Keep `RESTIC_PASSWORD`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` and `RESTIC_REPOSITORY` outside the
+VPS** (`setup` prints them). Without them the repository cannot be read.
+
+Disaster recovery on a fresh VPS: `harden.sh` → clone this repo into `/srv/hermes/stack` → put
+those four values in `.env` → `sudo ./backup.sh restore latest /srv/restore` → follow the
+printed `rsync` lines (they put `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env` back) →
+`sudo ./install.sh`. All OAuth logins, memory, sessions and skills come back with `data/`.
+Hermes-only alternative into a running agent: `hermes import /opt/data/backups/<zip>`.
+
 ## Files & Python
 
 - Put files in `/srv/hermes/workspace` on the VPS → visible as `/workspace` (agent cwd, workspace
@@ -153,10 +184,20 @@ docker compose logs -f hermes-workspace
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
 sudo ./update.sh                            # rebuild on latest base image, pull, recreate
+sudo ./heal.sh                              # what hermes-heal.timer does every minute
+systemctl list-timers 'hermes-*'            # backup 03:00 daily, update Sun 03:30, heal every minute
 ```
 
-Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes setup`, then
-`docker compose restart hermes-agent`. Resource limits: `AGENT_MEM_LIMIT`, `AGENT_CPUS` in `.env`.
+Timers (installed by `install.sh` from `systemd/`): `hermes-update.timer` runs `update.sh`
+every Sunday 03:30 (after the 03:00 backup, before the 04:30 unattended-upgrades reboot window);
+`hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks unhealthy and
+starts exited ones (Docker's own restart policy only reacts to a process exiting). It stays idle
+when nothing in the project runs (`docker compose down`/`stop` for maintenance).
+
+Restarting the agent: `docker compose up -d --force-recreate hermes-agent` (not `restart` —
+`hermes-workspace` and `hermes-dashboard` live in its network namespace and must be recreated
+with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resource limits:
+`AGENT_MEM_LIMIT`, `AGENT_CPUS` in `.env`.
 
 ## Layout
 
@@ -167,7 +208,9 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
 | `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
-| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins / upgrade |
+| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / upgrade |
+| `backup.sh` / `heal.sh` | restic → B2 backups / self-healing |
+| `systemd/` | `hermes-backup`, `hermes-update`, `hermes-heal` service + timer templates |
 | `lib/common.sh` | shared helpers |
 | `.env.example` | all variables |
 
@@ -190,5 +233,9 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
 - **Permission denied under `/srv/hermes`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
   directory owner; re-run `sudo ./install.sh`.
 - **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT` (default 10g / 6 CPUs, sized for an 8 vCPU / 16 GB VPS).
+- **Backup failed** — `journalctl -u hermes-backup -n 50`; `sudo ./backup.sh restic unlock` after
+  an interrupted run; `sudo ./backup.sh check` to verify the repository.
+- **`hermes-dashboard` exited (137)** — expected right after an agent restart (shared PID
+  namespace); `heal.sh` starts it again within a minute.
 - **Local testing without root** — `ALLOW_NON_ROOT=1 ./install.sh` with `HERMES_*_DIR` pointing at
   directories you own.

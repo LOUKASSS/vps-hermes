@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly Hermes stack update (Sunday 03:30, after the backup, before the 04:30 reboot window)
+
+[Timer]
+OnCalendar=Sun *-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

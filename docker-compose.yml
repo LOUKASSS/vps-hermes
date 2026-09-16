@@ -1,8 +1,10 @@
 # Hermes Agent + Hermes Workspace + Traefik — single-VPS stack.
 #
 #   install.sh  → first boot on a fresh VPS
-#   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh)
-#   update.sh   → rebuild + pull + recreate
+#   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh), messaging platforms
+#   backup.sh   → restic backups to Backblaze B2 (nightly timer)
+#   update.sh   → rebuild + pull + recreate (weekly timer)
+#   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
 #
 # Topology:
 #   traefik ──proxy──▶ hermes-agent netns ─ :3000 hermes-workspace (public via Traefik)
@@ -115,6 +117,16 @@ services:
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/home/workspace/.hermes
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+    # Also probes the gateway on loopback: when hermes-agent restarts, containers joined to its
+    # netns are left in the old, orphaned namespace (loopback still works there, so probing only
+    # our own port would stay green). Seeing no gateway ⇒ unhealthy ⇒ heal.sh restarts us ⇒ we
+    # re-join the live namespace.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS -o /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   # Second dashboard instance for Hermes Desktop (Settings → Gateways → Remote gateway →
   # http://<tailscale-ip>:9120, username/password). The loopback dashboard above has no auth
@@ -122,7 +134,8 @@ services:
   # engages the gate, so Desktop gets its own instance. `init: true` makes tini PID 1, which
   # sends the image entrypoint down its non-s6 path: no supervision tree, no profile
   # reconciler, hence no second gateway on the shared data dir. Shares the agent's PID
-  # namespace so gateway-liveness detection works. API_SERVER_KEY must be passed or the
+  # namespace so gateway-liveness detection works (that also means it is killed whenever
+  # hermes-agent restarts; heal.sh starts it again). API_SERVER_KEY must be passed or the
   # bootstrap would generate one into /opt/data/.env and shadow the gateway's key.
   hermes-dashboard:
     image: hermes-agent-vps:latest
@@ -145,11 +158,12 @@ services:
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+    # Same orphaned-netns guard as hermes-workspace: probe the gateway too.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
+      interval: 20s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 60s
 
   # Obsidian Sync headless client (npm obsidian-headless, `ob`) in its own minimal image.

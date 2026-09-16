@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermes stack backup to Backblaze B2 (restic)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@STACK_DIR@/backup.sh run
+TimeoutStartSec=3h

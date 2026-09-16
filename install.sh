@@ -33,33 +33,6 @@ if [ ! -f .env ]; then
 fi
 chmod 600 .env
 
-# set_env KEY VALUE — write/replace KEY in .env
-set_env() {
-  local key="$1" val="$2"
-  if grep -q "^${key}=" .env; then
-    sed -i "s|^${key}=.*|${key}=${val}|" .env
-  else
-    printf '%s=%s\n' "$key" "$val" >> .env
-  fi
-}
-# env_val KEY — current value in .env (empty if unset)
-env_val() { grep -E "^$1=" .env | head -n1 | cut -d= -f2- || true; }
-
-# ask KEY "prompt" [secret] — keep existing/exported value, else prompt
-ask() {
-  local key="$1" prompt="$2" secret="${3:-}" cur val
-  cur="$(env_val "$key")"
-  [ -n "${!key:-}" ] && cur="${!key}"
-  case "$cur" in
-    ""|workspace.example.com|you@example.com) ;;
-    *) set_env "$key" "$cur"; return ;;
-  esac
-  [ -t 0 ] || die "$key is not set and stdin is not a terminal. Set it in .env and re-run."
-  if [ -n "$secret" ]; then read -r -s -p "$prompt: " val; echo; else read -r -p "$prompt: " val; fi
-  [ -n "$val" ] || die "$key is required."
-  set_env "$key" "$val"
-}
-
 ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)"
 ask ACME_EMAIL       "Email for Let's Encrypt"
 ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit)" secret
@@ -121,6 +94,23 @@ if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]'
   agent_run hermes config set terminal.cwd /workspace >/dev/null
 fi
 
+# ── 6. systemd timers: weekly update, nightly backup (enabled once backup.sh setup ran) ──
+if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
+  for unit in "$STACK_DIR"/systemd/*; do
+    sed "s|@STACK_DIR@|$STACK_DIR|g" "$unit" > "/etc/systemd/system/$(basename "$unit")"
+  done
+  systemctl daemon-reload
+  systemctl enable --now hermes-update.timer hermes-heal.timer >/dev/null
+  if [ -n "$(env_val B2_ACCOUNT_KEY)" ] && [ -n "$(env_val RESTIC_PASSWORD)" ]; then
+    systemctl enable --now hermes-backup.timer >/dev/null
+    backup_note="nightly 03:00 → ${RESTIC_REPOSITORY}"
+  else
+    backup_note="not configured — run: sudo ./backup.sh setup"
+  fi
+else
+  backup_note="(timers skipped: no systemd / ALLOW_NON_ROOT)"
+fi
+
 compose ps
 cat <<MSG
 
@@ -130,10 +120,14 @@ cat <<MSG
                   user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
+  Backups       : ${backup_note}
+  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — manual: sudo ./update.sh
+  Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited)
 
-Next: configure model providers and CLI logins with your subscriptions:
+Next: configure model providers, CLI logins and messaging with your subscriptions:
 
   sudo ./auth.sh
+  sudo ./backup.sh setup     # Backblaze B2 backups (recommended before you rely on the agent)
 
 The certificate is issued on the first HTTPS request; give Traefik ~1 min once DNS points here.
 MSG

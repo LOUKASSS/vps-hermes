@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermes stack update (rebuild on latest base image, pull, recreate)
+After=docker.service network-online.target hermes-backup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@STACK_DIR@/update.sh
+TimeoutStartSec=1h

@@ -4,7 +4,7 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | obsidian | status | shell
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -39,7 +39,7 @@ do_claude_token() {
     else
       printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$tok" >> "$envf"
     fi
-    info "Stored in $envf. Restart the gateway to pick it up: docker compose restart hermes-agent"
+    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent"
   fi
 }
 
@@ -56,6 +56,28 @@ do_grok() {
 do_gh() {
   info "GitHub CLI login (device flow)."
   agent_exec gh auth login --web --git-protocol https
+  # git pushes over https reuse the gh token; commits need an identity (~/.gitconfig persists under /opt/data/home).
+  agent_run gh auth setup-git || warn "gh auth setup-git failed — git push will prompt for credentials"
+  local cur_name cur_email name email
+  cur_name="$(agent_run git config --global user.name 2>/dev/null || true)"
+  cur_email="$(agent_run git config --global user.email 2>/dev/null || true)"
+  read -r -p "Git user.name  [${cur_name:-unset}]: " name
+  read -r -p "Git user.email [${cur_email:-unset}]: " email
+  [ -n "$name" ]  && agent_run git config --global user.name "$name"
+  [ -n "$email" ] && agent_run git config --global user.email "$email"
+  agent_run git config --global --get-regexp '^user\.' || warn "no git identity set: the agent cannot commit until you set one"
+}
+
+do_messaging() {
+  info "Messaging platforms (Telegram, Discord, Slack, WhatsApp, …). Interactive wizard; tokens land in /opt/data/.env."
+  info "Bots use outbound polling/websockets — nothing to open in the firewall."
+  agent_exec hermes gateway setup
+  echo
+  read -r -p "Recreate the gateway now to apply the new platforms? [Y/n] " a
+  case "${a:-y}" in
+    [yY]*) restart_agent ;;
+    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent" ;;
+  esac
 }
 
 do_status() {
@@ -65,7 +87,21 @@ do_status() {
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
     echo; echo "── gh ──"; gh auth status 2>&1 || true
+    echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
+    echo; echo "── messaging ──"; hermes gateway status 2>&1 | head -n 20 || true
 '
+  echo; echo "── backups ──"
+  if [ -n "${RESTIC_PASSWORD:-}" ]; then
+    echo "repository: ${RESTIC_REPOSITORY}"
+    if systemctl list-timers hermes-backup.timer --no-pager 2>/dev/null | grep -q hermes-backup; then
+      systemctl list-timers hermes-backup.timer --no-pager | sed -n 2p
+      echo "last run: $(journalctl -u hermes-backup -n 1 --no-pager -o cat 2>/dev/null || echo none)"
+    else
+      echo "timer not installed (run ./install.sh)"
+    fi
+  else
+    echo "not configured (run: $STACK_DIR/backup.sh setup)"
+  fi
   echo; echo "── obsidian ──"
   if [ "${COMPOSE_PROFILES:-}" = obsidian ]; then
     docker inspect -f 'sidecar: {{.State.Status}}' obsidian-sync 2>/dev/null || echo "sidecar: not created"
@@ -105,8 +141,8 @@ run_target() {
   case "$1" in
     1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
     4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
-    7|obsidian) do_obsidian ;;
-    8|status) do_status ;; 9|shell) do_shell ;;
+    7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
+    9|status) do_status ;; 10|shell) do_shell ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -121,10 +157,11 @@ Hermes stack — auth
   3) claude-token  Claude Code CLI   (claude setup-token → CLAUDE_CODE_OAUTH_TOKEN)
   4) codex         Codex CLI         (codex login --device-auth)
   5) grok          Grok CLI          (grok login --device-auth)
-  6) gh            GitHub CLI        (gh auth login --web)
-  7) obsidian      Obsidian Sync    (ob login + ob sync-setup, starts the obsidian-sync sidecar)
-  8) status        Show login state
-  9) shell         Shell inside the agent container
+  6) gh            GitHub CLI        (gh auth login --web + git identity)
+  7) messaging     Telegram / Discord / Slack / WhatsApp… (hermes gateway setup)
+  8) obsidian      Obsidian Sync     (ob login + ob sync-setup, starts the obsidian-sync sidecar)
+  9) status        Show login state
+ 10) shell         Shell inside the agent container
   q) quit
 MENU
   read -r -p "> " choice
@@ -132,7 +169,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|obsidian|status|shell]"
+  run_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|status|shell]"
 else
   while true; do menu; echo; done
 fi

@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes stack healer (restart unhealthy, start exited containers)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@STACK_DIR@/heal.sh
+TimeoutStartSec=5min
