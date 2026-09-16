@@ -55,8 +55,8 @@ services:
     restart: unless-stopped
     command: ["gateway", "run"]
     shm_size: 1g
-    mem_limit: ${AGENT_MEM_LIMIT:-4g}
-    cpus: ${AGENT_CPUS:-2}
+    mem_limit: ${AGENT_MEM_LIMIT:-10g}
+    cpus: ${AGENT_CPUS:-6}
     environment:
       <<: *hermes-uid
       HERMES_DASHBOARD: "1"

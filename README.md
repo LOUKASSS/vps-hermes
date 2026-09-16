@@ -169,6 +169,6 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
   the upstream example config and `hermes setup` / `hermes model` stamp the version.
 - **Permission denied under `/srv/hermes`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
   directory owner; re-run `sudo ./install.sh`.
-- **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT`.
+- **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT` (default 10g / 6 CPUs, sized for an 8 vCPU / 16 GB VPS).
 - **Local testing without root** — `ALLOW_NON_ROOT=1 ./install.sh` with `HERMES_*_DIR` pointing at
   directories you own.
