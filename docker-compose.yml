@@ -78,7 +78,7 @@ services:
     ports:
       # Hermes Desktop backend (see hermes-dashboard below, which lives in this netns).
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
-      - "${DESKTOP_BIND:-0.0.0.0}:${DESKTOP_PORT:-9120}:${DESKTOP_PORT:-9120}"
+      - "${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}:${DESKTOP_PORT:-9120}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:9119/api/status >/dev/null || exit 1"]
       interval: 15s
@@ -218,7 +218,7 @@ services:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
     ports:
-      - "${DESKTOP_BIND:-0.0.0.0}:6768:6768"
+      - "${DESKTOP_BIND:-127.0.0.1}:6768:6768"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:6768/ || exit 1"]
       interval: 30s

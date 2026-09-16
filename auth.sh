@@ -147,7 +147,11 @@ do_orca() {
     mobile)  pairing="--mobile-pairing" ;;
     *) die "usage: $0 orca [desktop|mobile]" ;;
   esac
-  info "Orca remote server on the Tailscale IP (${DESKTOP_BIND:-?}:6768), same /workspace + CLI logins as the agent."
+  case "${DESKTOP_BIND:-}" in
+    ""|0.0.0.0|"::")
+      [ "${ORCA_ALLOW_PUBLIC:-0}" = 1 ] || die "DESKTOP_BIND is '${DESKTOP_BIND:-unset}': Orca would listen on every interface. Set it to the Tailscale IP (harden.sh + install.sh do this) or ORCA_ALLOW_PUBLIC=1 to override." ;;
+  esac
+  info "Orca remote server on ${DESKTOP_BIND}:6768, same /workspace + CLI logins as the agent."
   set_env ORCA_PAIRING "$pairing"; export ORCA_PAIRING="$pairing"
   enable_profile orca
   compose build orca

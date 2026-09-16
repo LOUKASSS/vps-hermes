@@ -49,8 +49,8 @@ TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || 
 if [ -n "$TS_IP" ]; then
   set_env DESKTOP_BIND "$TS_IP"
 else
-  [ -n "$(env_val DESKTOP_BIND)" ] || set_env DESKTOP_BIND 0.0.0.0
-  warn "No Tailscale IP found: the Desktop backend (port $(env_val DESKTOP_PORT | grep . || echo 9120)) is published on all interfaces — rely on the firewall or run harden.sh first."
+  [ -n "$(env_val DESKTOP_BIND)" ] || set_env DESKTOP_BIND 127.0.0.1
+  warn "No Tailscale IP found: Desktop backend (9120) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh if present,
