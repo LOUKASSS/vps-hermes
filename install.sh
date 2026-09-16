@@ -68,6 +68,17 @@ ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit)" secret
 _key="$(env_val API_SERVER_KEY)"
 [ "${#_key}" -ge 16 ] || set_env API_SERVER_KEY "$(openssl rand -hex 32)"
 [ -n "$(env_val HERMES_PASSWORD)" ] || set_env HERMES_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
+[ -n "$(env_val DESKTOP_PASSWORD)" ] || set_env DESKTOP_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
+[ -n "$(env_val DESKTOP_SECRET)" ]   || set_env DESKTOP_SECRET "$(openssl rand -base64 32 | tr -d '/+=')"
+[ -n "$(env_val DESKTOP_USERNAME)" ] || set_env DESKTOP_USERNAME admin
+# Publish the Desktop backend on the Tailscale IP only when the VPS is on a tailnet.
+TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
+if [ -n "$TS_IP" ]; then
+  set_env DESKTOP_BIND "$TS_IP"
+else
+  [ -n "$(env_val DESKTOP_BIND)" ] || set_env DESKTOP_BIND 0.0.0.0
+  warn "No Tailscale IP found: the Desktop backend (port $(env_val DESKTOP_PORT | grep . || echo 9120)) is published on all interfaces — rely on the firewall or run harden.sh first."
+fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh if present,
 # else the user who invoked sudo, else 1000.
@@ -113,8 +124,10 @@ fi
 compose ps
 cat <<MSG
 
-  Workspace URL : https://${WORKSPACE_HOST}$(command -v tailscale >/dev/null 2>&1 && ts=$(tailscale ip -4 2>/dev/null) && [ -n "$ts" ] && printf '   (DNS A record → %s, tailnet only)' "$ts")
+  Workspace URL : https://${WORKSPACE_HOST}$([ -n "$TS_IP" ] && printf '   (DNS A record → %s, tailnet only)' "$TS_IP")
   Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
+  Hermes Desktop: Settings → Gateways → Remote gateway → http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}
+                  user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
 

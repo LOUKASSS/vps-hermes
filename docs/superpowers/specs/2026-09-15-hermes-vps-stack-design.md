@@ -193,3 +193,15 @@ from `/srv/hermes/obsidian` (credentials isolated from the agent), vault bind-mo
 `/srv/hermes/workspace/$OBSIDIAN_VAULT_DIR`. The agent image does not ship `ob` (the agent only
 reads/writes vault files). Single sync client per vault. Compose profile `obsidian`, enabled by
 `auth.sh obsidian` after `ob login` + `ob sync-setup` run via `compose run` on the same image.
+
+## Addendum 2026-09-16 — Hermes Desktop
+
+Desktop talks to a dashboard backend with an auth provider (docs: username/password over
+Tailscale). The workspace needs the 9119 dashboard loopback + auth-free, and a loopback bind
+rejects remote clients, so a second instance `hermes-dashboard` (same image, `init: true` →
+non-s6 entrypoint path, no reconciler, no second gateway; `network_mode: service:hermes-agent`,
+`pid: container:hermes-agent`) binds `0.0.0.0:9120` with `HERMES_DASHBOARD_BASIC_AUTH_*`.
+Published on the host as `${DESKTOP_BIND}:9120` where `install.sh` sets `DESKTOP_BIND` to the
+Tailscale IP. `API_SERVER_KEY` is passed to it too, otherwise the bootstrap generates one into
+`/opt/data/.env` and shadows the gateway's key. Verified locally: `auth_required=true`,
+`providers=["basic"]`, single gateway, workspace unaffected.

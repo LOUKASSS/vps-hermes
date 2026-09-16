@@ -8,7 +8,8 @@ host-persistent storage the agent can read/write.
 ```
 Internet ──443──▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (public, password)
                                              ├ :8642 gateway API   (127.0.0.1 only)
-                                             └ :9119 dashboard     (127.0.0.1 only)
+                                             ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
+Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
 ├── stack/                   this repo: compose, scripts, .env
@@ -103,6 +104,25 @@ its tool subprocesses inside Docker — so the agent's own `claude -p …`, `cod
 Upstream notes: xAI OAuth can return `403` on some tiers (fallback: `XAI_API_KEY`); Codex plan
 quota semantics are not documented by Hermes.
 
+## Hermes Desktop
+
+Hermes Desktop connects to a **dashboard backend** (`hermes serve` / `hermes dashboard`) with an
+auth provider. The stack runs a second dashboard instance, `hermes-dashboard`, bound
+`0.0.0.0:9120` inside the agent's network namespace with the username/password provider, and
+publishes it on the **Tailscale IP only** (`DESKTOP_BIND`, set by `install.sh`). The first
+dashboard (9119) stays loopback and auth-free because the workspace needs it that way, and a
+loopback bind rejects remote clients — hence two instances. `hermes-dashboard` runs with
+`init: true` (no s6, no profile reconciler → no second gateway) and shares the agent's PID
+namespace for gateway-liveness detection.
+
+In the app: **Settings → Gateways → Remote gateway** → `http://<tailscale-ip>:9120` → **Sign in**
+with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` from `.env` (printed at the end of `install.sh`).
+`DESKTOP_SECRET` keeps you signed in across restarts. Check the gate:
+`curl -s http://<tailscale-ip>:9120/api/status | jq '.auth_required, .auth_providers'` → `true`, `["basic"]`.
+
+Username/password is the provider recommended by Hermes for VPN/tailnet access; for a
+public-internet backend Hermes recommends the Nous Portal OAuth provider instead — not needed here.
+
 ## Obsidian vault (optional)
 
 The agents write Markdown into `/workspace/<OBSIDIAN_VAULT_DIR>` (default `vault`, host
@@ -142,7 +162,7 @@ Messaging platforms (Telegram, Discord, …): `sudo ./auth.sh shell` → `hermes
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), obsidian-sync (profile `obsidian`) |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
 | `traefik/traefik.yml` | entrypoints 80→443 redirect, docker provider, `cloudflare` ACME resolver |
