@@ -1,0 +1,19 @@
+# Orca remote server on the host. Installed and filled in by orca.sh (edit .env, not this).
+[Unit]
+Description=Orca remote server (headless; claude / codex / grok for the Orca desktop and mobile apps)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+Group=@GROUP@
+EnvironmentFile=/etc/orca.env
+WorkingDirectory=@WORKDIR@
+# ORCA_PAIRING is "" or "--mobile-pairing" (unquoted on purpose). Orca starts its own Xvfb.
+ExecStart=/bin/sh -c 'exec /opt/orca/current/AppRun serve --port "$ORCA_PORT" --pairing-address "$DESKTOP_BIND" $ORCA_PAIRING'
+Restart=always
+RestartSec=5
+MemoryMax=@MEM@
+
+[Install]
+WantedBy=multi-user.target

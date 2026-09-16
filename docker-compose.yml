@@ -12,9 +12,8 @@
 #      │                                   ├ :8642 gateway API (127.0.0.1 only)
 #      └─▶ docker-socket-proxy (read-only  ├ :9119 dashboard (127.0.0.1 only, no auth gate)
 #          view of the Docker API)         └ :9120 hermes-dashboard for Desktop (basic auth)
-#   orca :6768 (profile orca)   obsidian-sync (profile obsidian)
-#   dind (profile dind): a second, private Docker daemon the agent and Orca drive through
-#   DOCKER_HOST=tcp://dind:2375 to `docker compose up` the projects they work on (test only).
+#   obsidian-sync (profile obsidian)
+#   Orca is NOT a container: orca.sh installs it on the host as a systemd service (orca.service).
 #
 # hermes-workspace runs with network_mode: service:hermes-agent so it can reach the
 # loopback-only dashboard (its session token is scraped from the dashboard root HTML,
@@ -129,15 +128,11 @@ services:
       API_SERVER_HOST: 127.0.0.1
       API_SERVER_PORT: "8642"
       API_SERVER_KEY: ${API_SERVER_KEY}
-      # Docker for the agent's own `docker compose` = the dind sidecar (profile dind), never the
-      # host daemon. Without the profile, docker commands fail with "cannot connect to dind".
-      DOCKER_HOST: tcp://dind:2375
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
     networks:
       - proxy
-      - dind
     ports:
       # Hermes Desktop backend (see hermes-dashboard below, which lives in this netns).
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
@@ -258,97 +253,9 @@ services:
       - ${OBSIDIAN_DIR:-/srv/hermes/obsidian}:/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}/${OBSIDIAN_VAULT_DIR:-vault}:/vault
 
-  # Orca remote server (https://www.onorca.dev/docs/remote-servers): drive claude / codex / grok
-  # yourself, from the Orca desktop or mobile app, on the same /workspace and with the same
-  # CLI logins as the agent (HOME=/opt/data/home). Built on the agent image; published on the
-  # Tailscale IP only. Enable: `sudo ./auth.sh orca` (sets the `orca` profile, prints the pairing link).
-  orca:
-    build:
-      context: ./orca
-      additional_contexts:
-        base: "service:hermes-agent"
-      args:
-        HERMES_UID: ${HERMES_UID:-1000}
-        HERMES_GID: ${HERMES_GID:-1000}
-        ORCA_VERSION: ${ORCA_VERSION:-latest}
-    image: orca-server:latest
-    container_name: orca
-    restart: unless-stopped
-    logging: *logging
-    profiles: ["orca"]
-    init: true
-    user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
-    shm_size: 1g
-    mem_limit: ${ORCA_MEM_LIMIT:-3g}
-    cpus: ${ORCA_CPUS:-2}
-    # ORCA_PAIRING is "" (desktop/runtime link) or "--mobile-pairing" (auth.sh orca mobile).
-    command: ["sh", "-c", "exec orca serve --port 6768 --pairing-address ${DESKTOP_BIND:-127.0.0.1} ${ORCA_PAIRING:-}"]
-    environment:
-      HOME: /opt/data/home
-      TZ: ${TZ:-UTC}
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      DOCKER_HOST: tcp://dind:2375
-    volumes:
-      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
-    networks:
-      - dind
-    ports:
-      - "${DESKTOP_BIND:-127.0.0.1}:6768:6768"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:6768/ || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
-
-  # Docker-in-Docker: a full, separate dockerd the agent and Orca use to build / `docker compose
-  # up` / test the projects under /workspace (DOCKER_HOST=tcp://dind:2375 on both). Nothing they
-  # start lands on the host daemon, and 80/443 are free inside its own netns, so a project with
-  # its own Traefik runs unmodified. /workspace is mounted at the same path so compose bind
-  # mounts (./conf:/etc/app) resolve. Plain TCP without TLS: the `dind` network is reachable from
-  # hermes-agent and orca only. `privileged` is unavoidable for a daemon — that is the sidecar's
-  # trust boundary: the agent only gets the Docker API of THIS daemon, not the host's.
-  # Enable: `sudo ./auth.sh dind`. Ports 80/443 of the test daemon are published on the Tailscale
-  # IP as 8080/8443 for you; the agent reaches them at http://dind:80 / https://dind:443.
-  dind:
-    image: docker:dind
-    container_name: dind
-    restart: unless-stopped
-    logging: *logging
-    profiles: ["dind"]
-    privileged: true
-    mem_limit: ${DIND_MEM_LIMIT:-4g}
-    cpus: ${DIND_CPUS:-2}
-    environment:
-      DOCKER_TLS_CERTDIR: ""
-      TZ: ${TZ:-UTC}
-    volumes:
-      - dind-data:/var/lib/docker
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
-    networks:
-      - dind
-    ports:
-      - "${DESKTOP_BIND:-127.0.0.1}:${DIND_HTTP_PORT:-8080}:80"
-      - "${DESKTOP_BIND:-127.0.0.1}:${DIND_HTTPS_PORT:-8443}:443"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2375/_ping >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
 networks:
   proxy:
     name: proxy
   docker-api:
     name: docker-api
     internal: true
-  # Not internal: dind must pull images from the internet.
-  dind:
-    name: dind
-
-volumes:
-  # Images/layers/volumes of the test daemon. Not backed up (test data): `docker volume rm` to reset.
-  dind-data:
-    name: hermes-dind-data

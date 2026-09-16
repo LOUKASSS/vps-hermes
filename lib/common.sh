@@ -83,9 +83,9 @@ MAINTENANCE_FLAG="$STACK_DIR/.maintenance"
 # shellcheck disable=SC2034
 UPDATE_HOLD="$STACK_DIR/.update-hold"
 
-# Resolve ORCA_VERSION=latest to the current release tag (GitHub API) and export it, so the
-# orca image only rebuilds when a new Orca release exists (the tag is a build arg / cache key).
-# Silently keeps "latest" when GitHub is unreachable (the Dockerfile then downloads the latest asset).
+# Resolve ORCA_VERSION=latest to the current release tag (GitHub API) and export it, so orca.sh
+# installs/updates only when the tag differs from the installed one. Silently keeps "latest" when
+# GitHub is unreachable (orca.sh then downloads the latest asset and reads the tag from its manifest).
 orca_resolve_version() {
   case "${ORCA_VERSION:-latest}" in latest|"")
     local tag
@@ -100,13 +100,6 @@ enable_profile() {
   local cur; cur="$(env_val COMPOSE_PROFILES)"
   case ",$cur," in *",$1,"*) ;; *) cur="${cur:+$cur,}$1"; set_env COMPOSE_PROFILES "$cur" ;; esac
   export COMPOSE_PROFILES="$cur"
-}
-
-# disable_profile <name> — the reverse.
-disable_profile() {
-  local cur; cur="$(env_val COMPOSE_PROFILES)"
-  cur="$(printf '%s' ",$cur," | sed "s/,$1,/,/g; s/^,//; s/,\$//")"
-  set_env COMPOSE_PROFILES "$cur"; export COMPOSE_PROFILES="$cur"
 }
 
 # Interactive command inside the agent container, as the runtime user, with HOME set

@@ -9,6 +9,7 @@
 #   sudo ./update.sh --force      # update even while on hold
 #
 # Only one step back is kept: an update overwrites the previous `:previous` tags.
+# Orca (host install) is updated at the end too; `orca.sh rollback` undoes that part.
 set -euo pipefail
 # shellcheck disable=SC1091
 . "$(dirname "$0")/lib/common.sh"
@@ -53,7 +54,6 @@ do_update() {
   lock_update
   info "Keeping the current images as :previous"
   save_previous
-  orca_resolve_version
   info "Rebuilding derived images on the latest bases…"
   compose build --pull
   info "Pulling the other images…"
@@ -71,6 +71,10 @@ do_update() {
   docker image prune -f >/dev/null
   docker builder prune -f --max-used-space 4g >/dev/null 2>&1 || docker builder prune -f --keep-storage 4g >/dev/null 2>&1 || true
   compose ps
+  # Orca lives on the host (orca.sh); it has its own previous/rollback, independent of the images.
+  if [ -e /opt/orca/current ]; then
+    "$STACK_DIR/orca.sh" update || warn "Orca update failed (stack update is fine): sudo $STACK_DIR/orca.sh update"
+  fi
 }
 
 case "${1:-}" in

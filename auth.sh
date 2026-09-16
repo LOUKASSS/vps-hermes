@@ -4,19 +4,18 @@
 # persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
 #
 #   sudo ./auth.sh                 # menu
-#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | orca | dind | status | shell | chat
+#   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell | chat
 set -euo pipefail
 
 # shellcheck disable=SC1091
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-# Everything but obsidian/orca/dind runs inside the agent container.
-need_agent() {
+# Everything but obsidian runs inside the agent container.
+case "${1:-}" in 8|obsidian) ;; *)
   running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
-  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d"
-}
-case "${1:-}" in 8|obsidian|9|orca|13|dind) ;; *) need_agent ;; esac
+  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
+esac
 
 do_hermes() {
   info "Hermes model provider — pick 'Anthropic' (Claude Max OAuth), 'ChatGPT or Codex Subscription', or 'xAI Grok OAuth (SuperGrok / Premium+)'."
@@ -109,18 +108,11 @@ do_status() {
   else
     echo "not configured (run: $STACK_DIR/backup.sh setup)"
   fi
-  echo; echo "── orca ──"
-  if [[ ",${COMPOSE_PROFILES:-}," == *,orca,* ]]; then
-    echo "server: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' orca 2>/dev/null || echo 'not created')  → ${DESKTOP_BIND:-?}:6768  (pairing link: $0 orca)"
+  echo; echo "── orca (host) ──"
+  if [ -e /opt/orca/current ]; then
+    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  (pairing link: $STACK_DIR/orca.sh pair)"
   else
-    echo "not enabled (run: $0 orca)"
-  fi
-  echo; echo "── dind (docker for the agent) ──"
-  if [[ ",${COMPOSE_PROFILES:-}," == *,dind,* ]]; then
-    echo "daemon: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' dind 2>/dev/null || echo 'not created')  → test ports ${DESKTOP_BIND:-?}:${DIND_HTTP_PORT:-8080}/${DIND_HTTPS_PORT:-8443}"
-    agent_run docker ps --format 'running in dind: {{.Names}} ({{.Image}})' 2>/dev/null || echo "agent cannot reach dind"
-  else
-    echo "not enabled (run: $0 dind)"
+    echo "not installed (run: sudo $STACK_DIR/orca.sh install)"
   fi
   echo; echo "── obsidian ──"
   if [[ ",${COMPOSE_PROFILES:-}," == *,obsidian,* ]]; then
@@ -150,108 +142,6 @@ do_obsidian() {
   info "obsidian-sync started. Status: docker compose logs -f obsidian-sync  |  ./auth.sh status"
 }
 
-# auth.sh orca [desktop|mobile] — enable the Orca remote server, print the pairing link.
-# Orca prints ONE pairing link per run: the runtime link (desktop app) by default, or a
-# mobile-scoped QR/link with --mobile-pairing. Already-paired devices keep their own tokens, so
-# switching modes to pair another device is safe.
-do_orca() {
-  local mode="${1:-desktop}" pairing=""
-  case "$mode" in
-    desktop) pairing="" ;;
-    mobile)  pairing="--mobile-pairing" ;;
-    *) die "usage: $0 orca [desktop|mobile]" ;;
-  esac
-  case "${DESKTOP_BIND:-}" in
-    ""|0.0.0.0|"::")
-      [ "${ORCA_ALLOW_PUBLIC:-0}" = 1 ] || die "DESKTOP_BIND is '${DESKTOP_BIND:-unset}': Orca would listen on every interface. Set it to the Tailscale IP (harden.sh + install.sh do this) or ORCA_ALLOW_PUBLIC=1 to override." ;;
-  esac
-  info "Orca remote server on ${DESKTOP_BIND}:6768, same /workspace + CLI logins as the agent."
-  set_env ORCA_PAIRING "$pairing"; export ORCA_PAIRING="$pairing"
-  enable_profile orca
-  orca_resolve_version
-  compose build orca
-  compose up -d orca
-  info "Waiting for Orca (up to 2 min)…"
-  wait_healthy orca 120 || { compose logs --tail=30 orca; die "orca not healthy"; }
-  local url web
-  # `{ grep || true; }`: under pipefail a grep without match would silently abort the script.
-  url="$(compose logs --no-log-prefix orca 2>/dev/null | { grep -o 'orca://pair[^ ]*' || true; } | tail -n1)"
-  web="$(compose logs --no-log-prefix orca 2>/dev/null | { grep -o 'http://[^ ]*web-index.html[^ ]*' || true; } | tail -n1)"
-  # Mobile mode prints a QR (ANSI block art) between "Mobile pairing QR:" and "Pairing URL:".
-  compose logs --no-log-prefix orca 2>/dev/null | sed -n '/pairing QR:/I,/^Pairing URL:/{/^Pairing URL:/!p}' | tail -n 60 || true
-  cat <<MSG
-
-  Mode          : $mode pairing   (other device type: sudo $0 orca $([ "$mode" = mobile ] && echo desktop || echo mobile))
-  Pairing link  : ${url:-<not found — docker compose logs orca>}
-  Browser client: ${web:-n/a}
-  Desktop app   : Settings → Remote Orca Servers → Add Server → paste the link
-  Mobile app    : scan the QR above / open the link on the phone (must be on the tailnet)
-
-Treat the link like a password (revocable under Shared Server Access in the app).
-MSG
-}
-
-# auth.sh dind [off] — enable (or remove) the Docker-in-Docker sidecar the agent and Orca use
-# for `docker compose up` of the projects under /workspace. Also drops a short note in the
-# agent's SOUL.md (HERMES_HOME, always in its system prompt) so it tests against `dind`, not
-# localhost, and knows nothing it starts reaches the VPS itself.
-DIND_NOTE_BEGIN="<!-- hermes-stack:dind -->"
-DIND_NOTE_END="<!-- /hermes-stack:dind -->"
-dind_note() {
-  local soul="$HERMES_DATA_DIR/SOUL.md"
-  [ -f "$soul" ] || return 0
-  # Strip a previous copy, then append (idempotent).
-  sed -i "\|^$DIND_NOTE_BEGIN\$|,\|^$DIND_NOTE_END\$|d" "$soul"
-  [ "${1:-add}" = add ] || return 0
-  cat >> "$soul" <<NOTE
-$DIND_NOTE_BEGIN
-
-## Docker
-\`docker\` / \`docker compose\` here talk to a private test daemon (\`dind\`, DOCKER_HOST=tcp://dind:2375),
-NOT the VPS. Ports a compose file publishes are on the host \`dind\`: test with \`curl http://dind:<port>\`,
-never localhost. Bind mounts only work for paths under /workspace. Nothing you start there is
-deployed: the operator runs \`docker compose up\` on the VPS themselves. Clean up with \`docker compose down\`.
-$DIND_NOTE_END
-NOTE
-}
-
-do_dind() {
-  if [ "${1:-}" = off ]; then
-    disable_profile dind
-    compose --profile dind stop dind 2>/dev/null || true
-    compose --profile dind rm -f dind 2>/dev/null || true
-    dind_note remove
-    info "dind removed (profile off). Its images/volumes stay in the hermes-dind-data volume: docker volume rm hermes-dind-data"
-    return 0
-  fi
-  [ -z "${1:-}" ] || die "usage: $0 dind [off]"
-  need_agent
-  case "${DESKTOP_BIND:-}" in
-    ""|0.0.0.0|"::") die "DESKTOP_BIND is '${DESKTOP_BIND:-unset}': the test ports would listen on every interface. Set it to the Tailscale IP first." ;;
-  esac
-  info "Docker-in-Docker sidecar for the agent/Orca (test daemon; nothing it runs touches the VPS)."
-  enable_profile dind
-  compose pull -q dind
-  compose up -d dind
-  info "Waiting for dind (up to 2 min)…"
-  wait_healthy dind 120 || { compose logs --tail=30 dind; die "dind not healthy"; }
-  # The agent image needs the compose plugin (rebuilt by install.sh/update.sh since this feature).
-  agent_run docker compose version >/dev/null 2>&1 \
-    || die "the agent image has no 'docker compose' yet: run sudo $STACK_DIR/update.sh --force, then re-run $0 dind"
-  agent_run docker version --format 'agent → dind: server {{.Server.Version}}' \
-    || die "the agent cannot reach dind (DOCKER_HOST=tcp://dind:2375): docker compose logs dind"
-  dind_note add
-  cat <<MSG
-
-  Agent / Orca : docker compose up -d   (in /workspace/<project>) runs inside dind
-  Your browser : http://${DESKTOP_BIND}:${DIND_HTTP_PORT:-8080}  https://${DESKTOP_BIND}:${DIND_HTTPS_PORT:-8443}   (= ports 80/443 of the test daemon)
-  Agent tests  : curl http://dind:80 / https://dind:443 (ports published in dind live on host "dind")
-  Inspect      : docker exec dind docker ps          Reset: sudo $0 dind off; docker volume rm hermes-dind-data
-
-Deploying for real is still yours: docker compose up -d on the VPS, outside this stack.
-MSG
-}
-
 do_shell() { agent_exec bash; }
 # Interactive Hermes CLI in the agent container: same config, sessions and /workspace as the
 # gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
@@ -262,9 +152,7 @@ run_target() {
     1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
     4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
     7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
-    9|orca) do_orca "${2:-desktop}" ;;
-    10|status) do_status ;; 11|shell) do_shell ;; 12|chat) do_chat "$@" ;;
-    13|dind) do_dind "${2:-}" ;;
+    9|status) do_status ;; 10|shell) do_shell ;; 11|chat) do_chat "$@" ;;
     q|Q|quit) exit 0 ;;
     *) return 1 ;;
   esac
@@ -282,11 +170,9 @@ Hermes stack — auth
   6) gh            GitHub CLI        (gh auth login --web + git identity)
   7) messaging     Telegram / Discord / Slack / WhatsApp… (hermes gateway setup)
   8) obsidian      Obsidian Sync     (ob login + ob sync-setup, starts the obsidian-sync sidecar)
-  9) orca          Orca remote server (claude/codex/grok from the Orca desktop/mobile app) — pairing link
- 10) status        Show login state
- 11) shell         Shell inside the agent container
- 12) chat          Hermes CLI chat inside the agent container (hermes chat)
- 13) dind          Docker-in-Docker sidecar: lets the agent/Orca `docker compose up` projects (test only)
+  9) status        Show login state
+ 10) shell         Shell inside the agent container
+ 11) chat          Hermes CLI chat inside the agent container (hermes chat)
   q) quit
 MENU
   read -r -p "> " choice
@@ -294,7 +180,7 @@ MENU
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|orca [desktop|mobile]|dind [off]|status|shell|chat [hermes chat args]]"
+  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|status|shell|chat [hermes chat args]]"
 else
   while true; do menu; echo; done
 fi

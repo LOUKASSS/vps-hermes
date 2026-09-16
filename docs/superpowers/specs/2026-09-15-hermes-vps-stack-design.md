@@ -291,12 +291,13 @@ Four-angle review (security, shell, docker/ops, docs). Changes:
   ignored and Let's Encrypt was asked with the `placeholder@example.com` from the file → "contact
   email has forbidden domain" → no certificate ever. Same settings, one source.
 
-## Addendum — Docker-in-Docker sidecar (2026-09-16)
+## Addendum — Orca moved to the host, dind dropped (2026-09-16)
 
-The agent and Orca need to `docker compose up` the projects they write, without any access to
-the host daemon. Service `dind` (profile `dind`, `docker:dind`, privileged, own `dockerd`,
-`/workspace` mounted at the same path, `hermes-dind-data` volume) on a dedicated `dind` network;
-`DOCKER_HOST=tcp://dind:2375` on `hermes-agent` and `orca`; docker CLI + compose plugin copied
-from `docker:cli` into the agent image (Orca inherits). Ports 80/443 of the test daemon published
-on `DESKTOP_BIND` as 8080/8443. `auth.sh dind [off]` toggles the profile and an idempotent
-"Docker" note in the agent's `SOUL.md`. Real deployment stays a manual `docker compose up` on the VPS.
+The Docker-in-Docker sidecar and the `orca` compose service were removed the same day they
+landed: the real need is deploying compose projects on this VPS, not testing them in a nested
+daemon. Orca now runs on the host (`orca.sh`: Xvfb + Electron libs, Node 22, the CLIs via
+`npm -g`, sha512-verified AppImage extracted under `/opt/orca/<tag>` with `current`/`previous`
+symlinks, `orca.service` as user `hermes` with `HOME=/srv/hermes/data/home` so logins stay shared
+with the agent, `MemoryMax=ORCA_MEM_LIMIT`). Orca sessions therefore have Docker and sudo on the
+VPS — the pairing link is a root credential. The agent container keeps no Docker access.
+`update.sh` calls `orca.sh update` last; `orca.sh rollback` is independent of the image rollback.
