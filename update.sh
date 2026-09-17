@@ -51,7 +51,8 @@ do_update() {
     warn "updates on hold since $(cat "$UPDATE_HOLD") (after a rollback). Lift with: sudo $0 resume — or: sudo $0 --force"
     exit 0
   fi
-  lock_update
+  # heal.sh holds this lock for up to ~5 min while it recreates the agent group; wait, do not skip silently.
+  lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
   info "Keeping the current images as :previous"
   save_previous
   info "Rebuilding derived images on the latest bases…"

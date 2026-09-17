@@ -112,7 +112,7 @@ do_status() {
   echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$WORKSPACE_HOST} + *.${DNS_ZONE:-$WORKSPACE_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
-    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  (pairing link: $STACK_DIR/orca.sh pair)"
+    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  user orca, HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"
   else
     echo "not installed (run: sudo $STACK_DIR/orca.sh install)"
   fi
@@ -149,6 +149,14 @@ do_shell() { agent_exec bash; }
 # gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
 do_chat() { shift; agent_exec hermes chat "$@"; }
 
+# Validate first, then run the target plainly: `run_target … || …` would switch `set -e` off
+# inside every do_* (a failed login would fall through to the next step).
+is_target() {
+  case "$1" in
+    1|hermes|2|claude|3|claude-token|4|codex|5|grok|6|gh|7|messaging|8|obsidian|9|status|10|shell|11|chat|q|Q|quit) ;;
+    *) return 1 ;;
+  esac
+}
 run_target() {
   case "$1" in
     1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
@@ -156,7 +164,6 @@ run_target() {
     7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
     9|status) do_status ;; 10|shell) do_shell ;; 11|chat) do_chat "$@" ;;
     q|Q|quit) exit 0 ;;
-    *) return 1 ;;
   esac
 }
 
@@ -178,11 +185,13 @@ Hermes stack — auth
   q) quit
 MENU
   read -r -p "> " choice
-  run_target "$choice" || warn "unknown choice: $choice"
+  is_target "$choice" || die "unknown choice: $choice"
+  run_target "$choice"
 }
 
 if [ -n "${1:-}" ]; then
-  run_target "$@" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|status|shell|chat [hermes chat args]]"
+  is_target "$1" || die "usage: $0 [hermes|claude|claude-token|codex|grok|gh|messaging|obsidian|status|shell|chat [hermes chat args]]"
+  run_target "$@"
 else
   while true; do menu; echo; done
 fi

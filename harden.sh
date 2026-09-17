@@ -93,7 +93,10 @@ if [ "$STACK_DIR" != "$HERMES_ROOT/stack" ]; then
     [ -f "$STACK_DIR/.env" ] && [ ! -f "$HERMES_ROOT/stack/.env" ] && cp "$STACK_DIR/.env" "$HERMES_ROOT/stack/.env"
   fi
 fi
-chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT"
+# Only the stack checkout: data dirs are chowned by install.sh (HERMES_UID) and orca.sh owns
+# $HERMES_ROOT/orca — a blanket chown -R here would hand them to the operator on every re-run.
+chown "$OP_USER:$OP_USER" "$HERMES_ROOT"
+chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT/stack"
 
 # ── 3. Kernel / journald / time ──────────────────────────────────────────
 cat > /etc/sysctl.d/90-hardening.conf <<'SYSCTL'

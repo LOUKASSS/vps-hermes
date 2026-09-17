@@ -93,9 +93,11 @@ services:
     environment:
       CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
       TZ: ${TZ:-UTC}
+    # Tailnet-only like everything else: bound to DESKTOP_BIND (the Tailscale IP), never 0.0.0.0,
+    # so nothing is on the WAN even before harden.sh / with ufw off. DNS-01 needs no inbound port.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${DESKTOP_BIND:-127.0.0.1}:80:80"
+      - "${DESKTOP_BIND:-127.0.0.1}:443:443"
     volumes:
       - ${TRAEFIK_DIR:-/srv/hermes/traefik}/acme.json:/acme/acme.json
     networks:

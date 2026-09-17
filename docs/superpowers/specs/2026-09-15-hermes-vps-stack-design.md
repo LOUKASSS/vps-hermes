@@ -311,3 +311,24 @@ device resolve `WORKSPACE_HOST` and any other name under the zone to the VPS: th
 Cloudflare A record is no longer needed (Cloudflare stays for the DNS-01 challenge). `DNS_ZONE`
 defaults to `WORKSPACE_HOST`; install.sh enforces host ⊂ zone and warns about a resolver on all
 interfaces.
+
+## Addendum — review fixes: Orca gets its own user, Traefik binds the Tailscale IP (2026-09-17)
+
+A four-way review (security, shell correctness, compose, docs) found one critical path: with
+`orca.service` running as `hermes` and `HOME=/srv/hermes/data/home`, every dotfile the agent
+container writes there (`~/.claude/settings.json` hooks, `~/.gitconfig core.hooksPath`,
+`~/.codex/config.toml` MCP commands, `.git/hooks` in the workspace) would execute as a
+passwordless-sudo user in the next Orca session — container → root on the host. Fix: `orca.sh`
+creates a system user `orca` (docker group + sudoers fragment `91-orca`) with its own 0700 HOME
+`ORCA_HOME` (`/srv/hermes/orca`), sessions start in `ORCA_HOME/work`, and only the agent's
+credential *files* are copied over (`orca.sh creds`; `orca.sh login <cli>` for separate accounts).
+Code is exchanged through git remotes; the workspace stays the container's (git's "dubious
+ownership" check refuses it for `orca`). `harden.sh` no longer `chown -R`s all of `/srv/hermes`.
+`ORCA_HOME` joins the backup set. The earlier "logins stay shared through the same HOME"
+statement above is superseded.
+
+Also from the review: Traefik's 80/443 now bind `DESKTOP_BIND` like every other published port
+(nothing on 0.0.0.0 even with ufw off); `update.sh` waits for the heal lock instead of exiting 1
+silently; `orca_resolve_version` survives a GitHub outage; `auth.sh` validates the target before
+running it (the `run_target || die` form had disabled `set -e` inside every `do_*`); the
+Cloudflare token needs Zone:Zone:Read in addition to Zone:DNS:Edit.

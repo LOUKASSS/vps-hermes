@@ -10,7 +10,8 @@
 #
 # What is backed up: $HERMES_DATA_DIR (config, auth.json, state.db, memory, skills, CLI creds under
 # home/, plus the consistent `hermes backup` zip under backups/), $HERMES_WORKSPACE_DIR (your files,
-# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json and the stack .env.
+# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env and, when Orca is
+# installed on the host, $ORCA_HOME (Orca state, pairings, its copies of the logins, work/).
 # Retention: 7 daily, 4 weekly, 6 monthly; prune runs on Sundays.
 #
 # Keep RESTIC_PASSWORD + the B2 credentials somewhere safe (password manager): without them the
@@ -91,8 +92,9 @@ do_run() {
 
   # 2. Encrypted, deduplicated upload of the host paths.
   info "restic backup → $RESTIC_REPOSITORY"
-  restic_run backup --tag hermes-stack "${EXCLUDES[@]}" \
-    "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env"
+  local paths=("$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env")
+  [ -d "$ORCA_HOME" ] && paths+=("$ORCA_HOME")
+  restic_run backup --tag hermes-stack "${EXCLUDES[@]}" "${paths[@]}"
 
   # 3. Retention. Prune (actual deletion, B2 API-call heavy) once a week.
   prune=()
@@ -110,15 +112,16 @@ do_restore() {
   restic_run --rw "$target" restore "$snap" --target /restore
   cat <<MSG
 
-Restored under $target. To put it back in place with the stack stopped:
-  docker compose --project-directory $STACK_DIR down
-  rsync -a $target$HERMES_DATA_DIR/ $HERMES_DATA_DIR/
-  rsync -a $target$HERMES_WORKSPACE_DIR/ $HERMES_WORKSPACE_DIR/
-  rsync -a $target$OBSIDIAN_DIR/ $OBSIDIAN_DIR/
-  cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && chmod 600 $TRAEFIK_DIR/acme.json
-  cp $target$STACK_DIR/.env $STACK_DIR/.env
-  $STACK_DIR/install.sh          # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
-  rm -rf $target                 # it holds every secret in clear
+Restored under $target. To put it back in place with the stack stopped (as root — restic kept the original owners/modes):
+  sudo docker compose --project-directory $STACK_DIR down
+  sudo rsync -a $target$HERMES_DATA_DIR/ $HERMES_DATA_DIR/
+  sudo rsync -a $target$HERMES_WORKSPACE_DIR/ $HERMES_WORKSPACE_DIR/
+  sudo rsync -a $target$OBSIDIAN_DIR/ $OBSIDIAN_DIR/
+  sudo cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && sudo chmod 600 $TRAEFIK_DIR/acme.json
+  sudo cp $target$STACK_DIR/.env $STACK_DIR/.env
+  sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
+$( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R orca:orca %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
+  sudo rm -rf $target            # it holds every secret in clear
 Alternative (Hermes state only, into a running agent): sudo ./auth.sh shell → hermes import /opt/data/backups/hermes-backup-<ts>.zip
 MSG
 }

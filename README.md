@@ -5,8 +5,8 @@ Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace
 subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar,
 host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
 weekly auto-updates, a self-healing timer, and an optional [Orca](https://www.onorca.dev) remote
-server **on the host** to drive the same CLIs on the same projects yourself, from desktop or
-phone — with Docker and sudo, so your Orca sessions can deploy on this VPS.
+server **on the host** to drive the same CLIs yourself, from desktop or phone — as its own user,
+with Docker and sudo, so your Orca sessions can deploy on this VPS.
 
 ```
 Tailnet ──53────▶ hermes-dns  (DNS_ZONE + *.DNS_ZONE → this VPS; Tailscale split DNS points here)
@@ -26,8 +26,9 @@ Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/
 
 `hermes-workspace` shares the agent container's network namespace, so the dashboard and the
 gateway API stay loopback-only (no auth gate, no exposure) while the workspace still reaches
-them. Nothing is reachable from the Internet once `harden.sh` ran: Traefik, the Desktop backend
-and Orca answer on the tailnet only (ufw: default deny, allow on `tailscale0`). Traefik reads container labels through
+them. Nothing is reachable from the Internet: Traefik (80/443), the Desktop backend, the DNS and
+Orca all bind the Tailscale IP (`DESKTOP_BIND`), and `harden.sh`'s firewall (default deny, allow
+on `tailscale0`) is the second layer. Traefik reads container labels through
 `docker-socket-proxy` (GET-only view of the Docker API) instead of the raw socket.
 
 ## Prerequisites
@@ -37,7 +38,8 @@ and Orca answer on the tailnet only (ufw: default deny, allow on `tailscale0`). 
   (`AGENT_MEM_LIMIT=10g`, `AGENT_CPUS=6`; lower them for a smaller box). No inbound port needed.
 - A Cloudflare zone containing `<WORKSPACE_HOST>` (for the Let's Encrypt DNS-01 challenge only —
   no public A record: the tailnet resolves the name through the stack's own DNS, see below).
-- Cloudflare API token with **Zone → DNS → Edit** on that zone.
+- Cloudflare API token with **Zone → DNS → Edit** *and* **Zone → Zone → Read** on that zone
+  (Traefik's ACME client looks the zone id up before writing the challenge record).
 - A Tailscale account (the VPS, your laptop and phone join the same tailnet).
 - The subscriptions you want to use: Claude **Max** (Anthropic OAuth needs Max + extra usage credits; Pro is not supported), ChatGPT Plus/Pro (Codex), SuperGrok / X Premium+.
 
@@ -61,8 +63,9 @@ What it does:
   (`--keep-key` to retain, `--rotate-key` to regenerate);
 - installs **Tailscale** and joins your tailnet (interactive URL, or `TS_AUTHKEY`);
 - **ufw**: deny in by default, allow everything on `tailscale0`, only UDP 41641 on the WAN NIC;
-  a `DOCKER-USER` block makes Docker-published ports (Traefik 80/443) unreachable from the
-  Internet but reachable from the tailnet (`--keep-public-ssh` keeps rate-limited SSH on WAN);
+  a `DOCKER-USER` block makes Docker-published ports unreachable from the Internet even if one
+  were ever bound to 0.0.0.0 (they all bind the Tailscale IP) but reachable from the tailnet
+  (`--keep-public-ssh` keeps rate-limited SSH on WAN);
 - **anti-lockout**: the firewall auto-disables after 10 min unless you confirm that
   `ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>` works from another terminal;
 - then **sshd** hardening: keys only, no root, `AllowUsers hermes`, `MaxAuthTries 3`;
@@ -180,42 +183,57 @@ public-internet backend Hermes recommends the Nous Portal OAuth provider instead
 [Orca](https://www.onorca.dev/docs/remote-servers) lets you run Claude Code / Codex / Grok
 sessions yourself — parallel agents, worktrees, diff review — from the Orca desktop app or the
 mobile app, with the runtime on the VPS. It is deliberately **not a container**: `orca.sh`
-installs it on the host as `orca.service`, running as the operator user `hermes` with
-`HOME=/srv/hermes/data/home` — the HOME the agent gives its tool subprocesses — so it uses **the
-same `claude` / `codex` / `grok` / `gh` logins as the agent** (no second login), works in
-`/srv/hermes/workspace` (the agent's `/workspace`), and, being on the host, has **Docker and
-sudo**: a session can `docker compose up` a project for real on this VPS, next to this stack
-(attach it to the `proxy` network and reuse the stack's Traefik with labels — 80/443 are taken).
+installs it on the host as `orca.service`, running as a dedicated system user **`orca`** (docker
+group, passwordless sudo) with its own `HOME` (`ORCA_HOME`, default `/srv/hermes/orca`, mode
+0700). Being on the host, a session can `docker compose up` a project for real on this VPS, next
+to this stack (attach it to the `proxy` network and reuse the stack's Traefik with labels — 80/443
+are taken).
+
+Why its own user and HOME, not the agent's: the agent container writes `/srv/hermes/data/home`
+and `/srv/hermes/workspace` as uid `HERMES_UID`, and anything a session on the host loads from
+there — `~/.claude/settings.json` hooks, `~/.gitconfig` (`core.hooksPath`), `~/.codex/config.toml`
+MCP commands, `.git/hooks` of a checkout — would run as a sudo user. So Orca never reads those
+directories: `orca.sh install` copies only the agent's **credential files** (`.claude/.credentials.json`,
+`.codex/auth.json`, `.grok/auth.json`, `gh/hosts.yml`) into `ORCA_HOME` (same accounts, no second
+login; both sides refresh their tokens on their own), and sessions start in `ORCA_HOME/work`.
 
 ```bash
-sudo ./orca.sh install         # Xvfb + Electron libs, Node 22, claude/codex/grok/gh on the host, Orca, orca.service; prints the pairing link
-sudo ./orca.sh pair mobile     # phone: scan the printed QR (phone on the tailnet); `pair desktop` = runtime link again
+sudo ./orca.sh install         # user orca, Xvfb + Electron libs, Node 22, claude/codex/grok/gh, Orca, orca.service, logins; prints the pairing link
+sudo ./orca.sh pair mobile     # phone: scan the printed QR (phone on the tailnet); `pair desktop` = runtime link (each restarts orca.service)
+sudo ./orca.sh creds           # re-copy the agent's logins after `auth.sh <cli>` (or if Orca's copy expired)
+sudo ./orca.sh login claude    # or log in as user orca with a different account (claude|codex|grok|gh)
 sudo ./orca.sh status | logs
 ```
+
+Sharing code with the agent: through git remotes (`gh` is logged in on both sides). Do not point
+Orca at `/srv/hermes/workspace` — it belongs to the container's uid, so git refuses it ("dubious
+ownership") and the point of the separate user is that Orca never executes what the agent wrote
+in place. Clone the repo under `ORCA_HOME/work`, push, let the agent pull (and vice versa).
 
 Desktop app: Settings → Remote Orca Servers → Add Server → paste the `orca://pair?…` link. Orca
 prints one pairing link per run (runtime link by default, mobile-scoped with `--mobile-pairing`);
 already-paired devices keep their tokens, so switching modes to add another device is fine. The
 printed browser URL (`http://<tailscale-ip>:6768/web-index.html#pairing=…`) also works from any
 browser on the tailnet. **Treat the link like a root password**: whoever holds it runs commands as
-`hermes` (passwordless sudo, docker group). Orca listens on `ORCA_PORT` (6768), advertises
+`orca` (passwordless sudo, docker group). Orca listens on `ORCA_PORT` (6768), advertises
 `DESKTOP_BIND` (the Tailscale IP) to clients, and the firewall from `harden.sh` keeps it off the
 Internet. Orca state (projects, pairings, secrets — unencrypted, no keyring) lives in
-`data/home/.config/orca` and is part of the backups.
+`ORCA_HOME/.config/orca`; `ORCA_HOME` is part of the backups when it exists.
 
 Layout: `/opt/orca/<tag>/` (extracted AppImage, sha512-verified against the release manifest),
-`/opt/orca/current` and `/opt/orca/previous` symlinks, `/usr/local/bin/orca`, `/etc/orca.env`
-(rendered from `.env`: `DESKTOP_BIND`, `ORCA_PORT`, `ORCA_PAIRING`, `ORCA_MEM_LIMIT` → `MemoryMax`).
+`/opt/orca/current` and `/opt/orca/previous` symlinks, `/usr/local/bin/orca`, `/etc/sudoers.d/91-orca`,
+`/etc/orca.env` (rendered from `.env`: `DESKTOP_BIND`, `ORCA_PORT`, `ORCA_PAIRING`) and `orca.service`
+(`MemoryMax` = `ORCA_MEM_LIMIT`). After editing those in `.env`: `sudo ./orca.sh update --force`.
 Versions: with `ORCA_VERSION=latest` (default) `orca.sh update` — run by `update.sh` at the end
 of every weekly update — resolves the current GitHub release, installs it only when it changed
 (sessions are restarted then), and refreshes the host CLIs with `npm -g`. `sudo ./orca.sh rollback`
 goes back to the previous release. Pin with `ORCA_VERSION=vX.Y.Z` in `.env`. `sudo ./orca.sh remove`
-drops the service and `/opt/orca` (keeps Node, the CLIs and the Orca state).
+drops the service, the sudoers fragment and `/opt/orca` (keeps Node, the CLIs, the `orca` user and
+`ORCA_HOME`: `sudo userdel -r orca` to drop those too).
 
-You and the Hermes agent share the files: Orca isolates its sessions in git worktrees, but
-nothing locks a plain checkout — keep agent work on branches/worktrees too. The agent container
-itself has no Docker (only Traefik sees the daemon, read-only, through the socket proxy): Hermes
-can write a compose project, you or an Orca session deploy it.
+The agent container itself has no Docker (only Traefik sees the daemon, read-only, through the
+socket proxy): Hermes can write a compose project, you or an Orca session deploy it — from a
+checkout under `ORCA_HOME/work`, after reviewing what it does (a compose file is root on the host).
 
 ## Obsidian vault (optional)
 
@@ -265,10 +283,11 @@ now and then.
    `cd /srv/hermes/stack && cp .env.example .env` and add `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`,
    `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`.
 2. `sudo ./install.sh` — installs Docker, asks host / email / CF token, starts an empty stack.
-3. `sudo ./backup.sh restore latest /srv/restore`, then `docker compose down` and the printed
-   `rsync`/`cp` lines (they put `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env` back).
+3. `sudo ./backup.sh restore latest /srv/restore`, then the printed `sudo` lines (stack down,
+   `rsync`/`cp` of `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env`).
 4. `sudo ./install.sh` again (re-chowns for this host's `hermes` uid, sets `DESKTOP_BIND`,
-   recreates), then `rm -rf /srv/restore` (it holds every secret in clear).
+   recreates). If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of
+   `ORCA_HOME` (pairings, state). Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
 
 All OAuth logins, memory, sessions and skills come back with `data/`. Hermes-only alternative
 into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backups/<zip>`.
@@ -343,7 +362,7 @@ per container). Traefik access log is off. There is no monitoring or alerting in
 | `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |
 | SSH key of `hermes` | `sudo /srv/hermes/stack/harden.sh --rotate-key` |
 | Orca pairings | revoke in the app (Shared Server Access) |
-| CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again |
+| CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again, then `sudo ./orca.sh creds` if Orca is installed |
 
 Changing `WORKSPACE_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
 (recreates `hermes-dns`, `traefik` and the agent group — the router labels live on
@@ -357,7 +376,7 @@ sudo systemctl disable --now hermes-backup.timer hermes-update.timer hermes-heal
 sudo rm /etc/systemd/system/hermes-* && sudo systemctl daemon-reload
 cd /srv/hermes/stack && docker compose --profile '*' down --remove-orphans
 docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps hermes-dns obsidian-sync
-sudo ./orca.sh remove              # if installed (then: apt remove nodejs gh; npm -g uninstall the CLIs)
+sudo ./orca.sh remove              # if installed (then: sudo userdel -r orca; apt remove nodejs gh; npm -g uninstall the CLIs)
 sudo rm -rf /srv/hermes            # data + every secret
 ```
 `harden.sh` leftovers if you want the host back to stock: `/etc/ufw/after*.rules` (HERMES block),
@@ -395,7 +414,7 @@ sudo rm -rf /srv/hermes            # data + every secret
   device Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
   must answer from anywhere on the tailnet.
 - **No certificate / browser warning** — `docker compose logs traefik`; check the Cloudflare zone and the
-  token scope (Zone:DNS:Edit). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`
+  token scope (Zone:DNS:Edit + Zone:Zone:Read — "zone could not be found" = Zone:Read missing). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`
   emails.
 - **Workspace shows "Offline"** — inside the agent:
   `docker compose exec hermes-agent curl -s 127.0.0.1:8642/health` and

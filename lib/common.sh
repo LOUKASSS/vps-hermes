@@ -25,7 +25,7 @@ load_env() {
   set +a
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
   : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
-  : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}"
+  : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=/srv/hermes/orca}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
   [ -n "${RESTIC_REPOSITORY:-}" ] || RESTIC_REPOSITORY="b2:${B2_BUCKET:-}:hermes"
   export RESTIC_REPOSITORY RESTIC_IMAGE
@@ -89,9 +89,10 @@ UPDATE_HOLD="$STACK_DIR/.update-hold"
 orca_resolve_version() {
   case "${ORCA_VERSION:-latest}" in latest|"")
     local tag
-    tag="$(curl -fsSL --max-time 20 https://api.github.com/repos/stablyai/orca/releases/latest 2>/dev/null \
+    tag="$({ curl -fsSL --max-time 20 https://api.github.com/repos/stablyai/orca/releases/latest 2>/dev/null || true; } \
       | sed -n 's/^  *"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-    [ -n "$tag" ] && export ORCA_VERSION="$tag" && info "Orca: latest release is $tag" ;;
+    if [ -n "$tag" ]; then export ORCA_VERSION="$tag"; info "Orca: latest release is $tag"
+    else warn "Orca: GitHub API unreachable, using the latest release asset"; fi ;;
   esac
 }
 
@@ -123,9 +124,10 @@ obsidian_exec() {
 # path inside the container so snapshot paths match the host. RESTIC_* / B2_* come from .env.
 #   restic_run [--rw <hostdir>] <restic args…>     (--rw mounts <hostdir> at /restore, writable)
 restic_run() {
-  local tty=() rw=()
+  local tty=() rw=() orca=()
   [ -t 0 ] && tty=(-it)
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
+  [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
   docker run --rm "${tty[@]}" "${rw[@]}" --name hermes-restic --hostname hermes-vps \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e B2_ACCOUNT_ID -e B2_ACCOUNT_KEY \
     -e RESTIC_CACHE_DIR=/cache -e TZ="${TZ:-UTC}" \
@@ -134,7 +136,7 @@ restic_run() {
     -v "$HERMES_WORKSPACE_DIR:$HERMES_WORKSPACE_DIR:ro" \
     -v "$TRAEFIK_DIR:$TRAEFIK_DIR:ro" \
     -v "$OBSIDIAN_DIR:$OBSIDIAN_DIR:ro" \
-    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" \
+    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" \
     "$RESTIC_IMAGE" "$@"
 }
 

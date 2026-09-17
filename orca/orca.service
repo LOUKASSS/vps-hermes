@@ -1,4 +1,5 @@
 # Orca remote server on the host. Installed and filled in by orca.sh (edit .env, not this).
+# Runs as the dedicated user `orca` in its own HOME (ORCA_HOME) — never the agent's data dir.
 [Unit]
 Description=Orca remote server (headless; claude / codex / grok for the Orca desktop and mobile apps)
 After=network-online.target tailscaled.service

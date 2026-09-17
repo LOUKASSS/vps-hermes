@@ -35,7 +35,7 @@ chmod 600 .env
 
 ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)"
 ask ACME_EMAIL       "Email for Let's Encrypt"
-ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit)" secret
+ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" secret
 # DNS zone served to the tailnet: WORKSPACE_HOST itself unless you chose a wider one.
 _zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
 [ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
@@ -64,7 +64,7 @@ if [ -n "$TS_IP" ]; then
   esac
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
-  warn "No Tailscale IP found: Desktop backend (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+  warn "No Tailscale IP found: Traefik (80/443), Desktop backend (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
@@ -151,5 +151,5 @@ Next: configure model providers, CLI logins and messaging with your subscription
   sudo ./backup.sh setup     # Backblaze B2 backups (recommended before you rely on the agent)
   sudo ./orca.sh install     # optional: Orca remote server on the host (claude/codex/grok yourself, desktop + phone)
 
-The certificate is issued on the first HTTPS request; give Traefik ~1 min once DNS points here.
+Traefik requests the certificate (DNS-01 via Cloudflare) as soon as it starts — give it ~1-2 min; no public DNS needed.
 MSG
