@@ -5,4 +5,4 @@ After=docker.service
 [Service]
 Type=oneshot
 ExecStart=@STACK_DIR@/heal.sh
-TimeoutStartSec=5min
+TimeoutStartSec=10min

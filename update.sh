@@ -18,16 +18,29 @@ load_env
 cd "$STACK_DIR"
 
 # Every image reference the enabled services use (+ restic, which is not a compose service).
-image_refs() { { compose config --images; echo "$RESTIC_IMAGE"; } | sort -u; }
+image_refs() {
+  local refs; refs="$(compose config --images)" || die "docker compose config failed (bad .env?)"
+  { printf '%s\n' "$refs"; echo "$RESTIC_IMAGE"; } | sort -u
+}
 prev_tag() { echo "${1%:*}:previous"; }
 
+# Tag as :previous the image each container is actually RUNNING (docker inspect .Image), not
+# whatever :latest resolves to now — a pull that failed half-way must not become the rollback
+# target. Images with no running container (restic, a stopped profile) fall back to the tag.
 save_previous() {
-  local img
+  local img id c ref
+  declare -A seen=()
+  while read -r c; do
+    [ -n "$c" ] || continue
+    ref="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null)" || continue
+    id="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)" || continue
+    docker tag "$id" "$(prev_tag "$ref")" && seen["$ref"]=1
+  done < <(compose ps -aq)
   for img in $(image_refs); do
+    [ -n "${seen[$img]:-}" ] && continue
     docker image inspect "$img" >/dev/null 2>&1 || continue
     docker tag "$img" "$(prev_tag "$img")"
   done
-  image_refs | while read -r img; do printf '%s %s\n' "$img" "$(docker image inspect -f '{{.Id}}' "$img" 2>/dev/null || echo -)"; done > "$STACK_DIR/.images.previous"
 }
 
 do_rollback() {
@@ -55,13 +68,19 @@ do_update() {
   lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
   info "Keeping the current images as :previous"
   save_previous
+  # --no-cache: the npm/apk/apt layers must re-run even when the base image digest did not move,
+  # otherwise the CLIs and dnsmasq only advance when the base happens to change.
   info "Rebuilding derived images on the latest bases…"
-  compose build --pull
+  compose build --pull --no-cache
   info "Pulling the other images…"
   compose pull --ignore-buildable
   docker pull -q "$RESTIC_IMAGE" >/dev/null
   info "Recreating containers…"
-  compose up -d --remove-orphans
+  if ! compose up -d --remove-orphans; then
+    warn "docker compose up failed mid-way → rolling back"
+    do_rollback
+    exit 1
+  fi
   if ! wait_healthy hermes-agent 180 || ! wait_healthy hermes-workspace 120; then
     compose logs --tail=40 hermes-agent hermes-workspace
     warn "stack not healthy after the update → rolling back"

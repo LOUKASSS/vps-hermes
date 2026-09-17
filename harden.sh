@@ -48,7 +48,7 @@ apt-get update -q
 apt-get -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" full-upgrade
 apt-get install -y -q --no-install-recommends \
   ca-certificates curl gnupg lsb-release ufw unattended-upgrades apt-listchanges \
-  fail2ban needrestart openssh-server openssl rsync jq sudo git
+  fail2ban python3-systemd needrestart openssh-server openssl rsync jq sudo git
 
 # ── 2. Operator user + SSH key ───────────────────────────────────────────
 if ! id "$OP_USER" >/dev/null 2>&1; then
@@ -172,6 +172,7 @@ enabled = true
 F2B
 systemctl enable --now fail2ban >/dev/null
 systemctl restart fail2ban
+sleep 2; fail2ban-client status sshd >/dev/null 2>&1 || die "fail2ban: the sshd jail is not running (fail2ban-client status; journalctl -u fail2ban)"
 
 # ── 6. Docker daemon defaults (read when install.sh installs Docker) ─────
 if [ ! -f /etc/docker/daemon.json ]; then
@@ -184,6 +185,19 @@ if [ ! -f /etc/docker/daemon.json ]; then
 }
 DOCKER
 fi
+
+# Published ports bind the Tailscale IP: make dockerd wait (up to 60 s) for tailscaled to have
+# it at boot, or the containers fail to start until heal.sh runs.
+install -d /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/10-tailscale.conf <<'UNIT'
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker: no Tailscale IP after 60 s, starting anyway" >&2'
+UNIT
+systemctl daemon-reload
 
 # ── 7. Tailscale ─────────────────────────────────────────────────────────
 if ! command -v tailscale >/dev/null 2>&1; then

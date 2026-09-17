@@ -83,7 +83,7 @@ as_orca() {
 
 # ── host dependencies ────────────────────────────────────────────────────
 # First package name apt knows (Ubuntu 24.04 uses t64 names, 22.04 does not).
-apt_pick() { local n; for n in "$@"; do apt-cache show "$n" >/dev/null 2>&1 && { echo "$n"; return; }; done; warn "no candidate for $1"; }
+apt_pick() { local n; for n in "$@"; do apt-cache show "$n" >/dev/null 2>&1 && { echo "$n"; return; }; done; die "no apt candidate for $1 (unsupported Ubuntu release?)"; }
 
 install_deps() {
   info "Installing Xvfb + Electron headless libraries…"
@@ -131,24 +131,26 @@ install_clis() {
 fetch_release() {
   local want="$1" base tmp tag sum_want sum_got
   case "$want" in latest|"") base="$RELEASES/latest/download" ;; *) base="$RELEASES/download/$want" ;; esac
-  TMP_DIR="$(mktemp -d)"; tmp="$TMP_DIR"
+  mkdir -p "$ORCA_ROOT"
+  TMP_DIR="$(mktemp -d -p "$ORCA_ROOT" .dl.XXXXXX)"; tmp="$TMP_DIR"   # same filesystem: the final mv is an atomic rename
   info "Downloading Orca ($want)…"
   curl -fsSL "$base/latest-linux.yml" -o "$tmp/latest-linux.yml"
   tag="v$(sed -n 's/^version: *//p' "$tmp/latest-linux.yml" | head -n1)"
   [ "$tag" != v ] || die "cannot read the version from latest-linux.yml"
   FETCHED_TAG="$tag"
-  if [ -d "$ORCA_ROOT/$tag" ]; then info "Orca $tag already downloaded"; return 0; fi
+  if [ -f "$ORCA_ROOT/$tag/VERSION" ]; then info "Orca $tag already downloaded"; return 0; fi
+  rm -rf "${ORCA_ROOT:?}/$tag"   # a leftover without VERSION = interrupted install
   curl -fL --progress-bar "$base/orca-linux.AppImage" -o "$tmp/orca.AppImage"
   sum_want="$(sed -n '/url: orca-linux.AppImage/{n;s/^ *sha512: *//p}' "$tmp/latest-linux.yml" | head -n1 | base64 -d | od -An -tx1 -v | tr -d ' \n')"
   sum_got="$(sha512sum "$tmp/orca.AppImage" | cut -d' ' -f1)"
   [ -n "$sum_want" ] && [ "$sum_want" = "$sum_got" ] || die "orca-linux.AppImage: sha512 mismatch (want ${sum_want:-?} got $sum_got)"
   chmod +x "$tmp/orca.AppImage"
   (cd "$tmp" && ./orca.AppImage --appimage-extract >/dev/null)
-  mkdir -p "$ORCA_ROOT"
+  rm -f "$tmp/orca.AppImage"
+  chown -R root:root "$tmp/squashfs-root"
+  chmod 4755 "$tmp/squashfs-root/chrome-sandbox"          # Electron's setuid helper
+  echo "$tag" > "$tmp/squashfs-root/VERSION"                # written last: marks a complete tree
   mv "$tmp/squashfs-root" "$ORCA_ROOT/$tag"
-  chown -R root:root "$ORCA_ROOT/$tag"
-  chmod 4755 "$ORCA_ROOT/$tag/chrome-sandbox"          # Electron's setuid helper
-  echo "$tag" > "$ORCA_ROOT/$tag/VERSION"
 }
 
 # activate <tag> — current → tag, previous → old current; prune anything else.
@@ -250,6 +252,11 @@ do_install() {
 # is switched and restarted only on a new release (or --force).
 do_update() {
   [ -e "$ORCA_ROOT/current" ] || die "Orca is not installed: sudo $0 install"
+  if [ -e "$ORCA_ROOT/.hold" ] && [ "${1:-}" != --force ]; then
+    warn "Orca updates on hold since $(cat "$ORCA_ROOT/.hold") (after orca.sh rollback). Lift with: sudo $0 update --force"
+    return 0
+  fi
+  [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
   install_clis
   orca_resolve_version
   local cur; cur="$(installed_version)"
@@ -267,7 +274,8 @@ do_rollback() {
   [ -e "$ORCA_ROOT/previous" ] || die "no previous Orca release kept"
   local prev cur; prev="$(readlink -f "$ORCA_ROOT/previous")"; cur="$(readlink -f "$ORCA_ROOT/current")"
   ln -sfn "$cur" "$ORCA_ROOT/previous"; ln -sfn "$prev" "$ORCA_ROOT/current"
-  info "Orca: $(basename "$cur") → $(basename "$prev")"
+  date -Is > "$ORCA_ROOT/.hold"   # the weekly update.sh → orca.sh update must not re-activate $cur
+  info "Orca: $(basename "$cur") → $(basename "$prev") — updates on hold until: sudo $0 update --force"
   restart_and_pair
 }
 
@@ -295,7 +303,7 @@ do_login() {
 
 do_status() {
   if [ -e "$ORCA_ROOT/current" ]; then
-    echo "orca $(installed_version) (previous: $(cat "$ORCA_ROOT/previous/VERSION" 2>/dev/null || echo none))  orca.service: $(systemctl is-active orca 2>/dev/null)"
+    echo "orca $(installed_version) (previous: $(cat "$ORCA_ROOT/previous/VERSION" 2>/dev/null || echo none))  orca.service: $(systemctl is-active orca 2>/dev/null)$([ -e "$ORCA_ROOT/.hold" ] && echo "  UPDATES ON HOLD (update --force)")"
     echo "listening: $(ss -ltnH "sport = :$ORCA_PORT" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')  advertised: ${DESKTOP_BIND:-?}:$ORCA_PORT  pairing: $([ -n "${ORCA_PAIRING:-}" ] && echo mobile || echo desktop)"
     echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR"
     local f; for f in "${CRED_FILES[@]}"; do [ -f "$ORCA_HOME/$f" ] && echo "  login: $f" || echo "  no login: $f"; done

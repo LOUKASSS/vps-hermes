@@ -94,6 +94,10 @@ chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_D
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
 # ── 4. Build + start ─────────────────────────────────────────────────────
+# Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
+if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
+  lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
+fi
 info "Building derived image (pulls nousresearch/hermes-agent:latest)…"
 compose build --pull
 info "Pulling remaining images…"

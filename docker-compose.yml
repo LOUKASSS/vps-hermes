@@ -105,12 +105,12 @@ services:
       - --providers.docker.endpoint=tcp://docker-socket-proxy:2375
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=proxy
-      - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL:?set by install.sh}
       - --certificatesresolvers.cloudflare.acme.storage=/acme/acme.json
       - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
       - --certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53
     environment:
-      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:?set by install.sh}
       TZ: ${TZ:-UTC}
     # Tailnet-only like everything else: bound to DESKTOP_BIND (the Tailscale IP), never 0.0.0.0,
     # so nothing is on the WAN even before harden.sh / with ufw off. DNS-01 needs no inbound port.
@@ -152,7 +152,7 @@ services:
       # Loopback is enough: hermes-workspace shares this network namespace.
       API_SERVER_HOST: 127.0.0.1
       API_SERVER_PORT: "8642"
-      API_SERVER_KEY: ${API_SERVER_KEY}
+      API_SERVER_KEY: ${API_SERVER_KEY:?set by install.sh}
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
@@ -171,7 +171,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: proxy
-      traefik.http.routers.workspace.rule: Host(`${WORKSPACE_HOST}`)
+      traefik.http.routers.workspace.rule: Host(`${WORKSPACE_HOST:?set by install.sh}`)
       traefik.http.routers.workspace.entrypoints: websecure
       traefik.http.routers.workspace.tls.certresolver: cloudflare
       traefik.http.routers.workspace.service: workspace
@@ -196,8 +196,8 @@ services:
       HERMES_WORKSPACE_DIR: /workspace
       HERMES_API_URL: http://127.0.0.1:8642
       HERMES_DASHBOARD_URL: http://127.0.0.1:9119
-      HERMES_API_TOKEN: ${API_SERVER_KEY}
-      HERMES_PASSWORD: ${HERMES_PASSWORD}
+      HERMES_API_TOKEN: ${API_SERVER_KEY:?set by install.sh}
+      HERMES_PASSWORD: ${HERMES_PASSWORD:?set by install.sh}
       COOKIE_SECURE: "1"
       TRUST_PROXY: "1"
       HOST: 0.0.0.0
@@ -244,10 +244,10 @@ services:
     command: ["dashboard", "--host", "0.0.0.0", "--port", "${DESKTOP_PORT:-9120}", "--no-open"]
     environment:
       <<: *hermes-uid
-      API_SERVER_KEY: ${API_SERVER_KEY}
+      API_SERVER_KEY: ${API_SERVER_KEY:?set by install.sh}
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${DESKTOP_USERNAME:-admin}
-      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD}
-      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD:?set by install.sh}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET:?set by install.sh}
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace

@@ -7,7 +7,6 @@ acme.json
 .claude/
 .maintenance
 .update-hold
-.images.previous
 *.zip
 restore/
 hermes-ssh/

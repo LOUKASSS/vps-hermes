@@ -12,7 +12,7 @@ set -euo pipefail
 load_env
 
 # Everything but obsidian runs inside the agent container.
-case "${1:-}" in 8|obsidian) ;; *)
+case "${1:-}" in 8|obsidian|9|status) ;; *)
   running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
   [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
 esac
@@ -85,7 +85,9 @@ do_messaging() {
 }
 
 do_status() {
-  agent_run sh -c '
+  if [ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" != true ]; then
+    echo "── hermes-agent is NOT running (logins not shown): docker compose ps ──"
+  else agent_run sh -c '
     echo "── hermes providers ──"; hermes auth list 2>&1 || true; hermes config get model 2>&1 || true
     echo; echo "── claude ──"; claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
@@ -94,8 +96,11 @@ do_status() {
     echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
     echo; echo "── messaging ──"; hermes gateway status 2>&1 | head -n 20 || true
 '
+  fi
   echo; echo "── updates ──"
-  if [ -e "$UPDATE_HOLD" ]; then echo "ON HOLD since $(cat "$UPDATE_HOLD") (after a rollback) — sudo $STACK_DIR/update.sh resume"; else echo "automatic (Sunday 03:30)"; fi
+  if [ -e "$UPDATE_HOLD" ]; then echo "ON HOLD since $(cat "$UPDATE_HOLD") (after a rollback) — sudo $STACK_DIR/update.sh resume"
+  elif systemctl is-enabled -q hermes-update.timer 2>/dev/null; then echo "automatic (Sunday 03:30)"
+  else echo "timer disabled (sudo systemctl enable --now hermes-update.timer)"; fi
   [ -e "$MAINTENANCE_FLAG" ] && echo "heal.sh PAUSED ($MAINTENANCE_FLAG exists)"
   echo; echo "── backups ──"
   if [ -n "${RESTIC_PASSWORD:-}" ]; then

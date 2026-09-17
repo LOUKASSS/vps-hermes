@@ -151,8 +151,9 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 | `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
 
-Menu numbers work as arguments too (`sudo ./auth.sh 8`). `obsidian` does not need the agent
-container to be running; everything else does. Orca has its own script: `orca.sh` (below).
+Menu numbers work as arguments too (`sudo ./auth.sh 8`). `obsidian` and `status` (as arguments)
+work while the agent container is down; everything else, and the menu itself, needs it running.
+Orca has its own script: `orca.sh` (below).
 
 Everything runs as the runtime user with `HOME=/opt/data/home`, which is the HOME Hermes gives
 its tool subprocesses inside Docker — so the agent's own `claude -p …`, `codex exec …`,
@@ -232,7 +233,8 @@ Layout: `/opt/orca/<tag>/` (extracted AppImage, sha512-verified against the rele
 Versions: with `ORCA_VERSION=latest` (default) `orca.sh update` — run by `update.sh` at the end
 of every weekly update — resolves the current GitHub release, installs it only when it changed
 (sessions are restarted then), and refreshes the host CLIs with `npm -g`. `sudo ./orca.sh rollback`
-goes back to the previous release. Pin with `ORCA_VERSION=vX.Y.Z` in `.env`. `sudo ./orca.sh remove`
+goes back to the previous release and puts Orca updates on hold (`/opt/orca/.hold`) until
+`sudo ./orca.sh update --force`. Pin with `ORCA_VERSION=vX.Y.Z` in `.env`. `sudo ./orca.sh remove`
 drops the service, the sudoers fragment and `/opt/orca` (keeps Node, the CLIs, the `orca` user and
 `ORCA_HOME`: `sudo userdel -r orca` to drop those too).
 
@@ -316,7 +318,7 @@ docker compose logs -f hermes-workspace
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
 sudo ./auth.sh status                       # logins, update hold, backup timer, orca (host), obsidian
-sudo ./update.sh                            # rebuild on latest base image, pull, recreate (auto-rollback if unhealthy)
+sudo ./update.sh                            # rebuild on latest base image (no cache), pull, recreate (auto-rollback if unhealthy)
 sudo ./update.sh rollback                   # back to the images that ran before the last update, and hold
 sudo ./update.sh resume                     # lift the hold
 sudo ./heal.sh                              # what hermes-heal.timer does every minute
@@ -378,9 +380,9 @@ the old certificate stays in `acme.json`, harmless.
 
 ```bash
 sudo systemctl disable --now hermes-backup.timer hermes-update.timer hermes-heal.timer
-sudo rm /etc/systemd/system/hermes-* && sudo systemctl daemon-reload
+sudo rm /etc/systemd/system/hermes-* /etc/systemd/system/docker.service.d/10-tailscale.conf && sudo systemctl daemon-reload
 cd /srv/hermes/stack && docker compose --profile '*' down --remove-orphans
-docker volume rm hermes-restic-cache; docker image rm hermes-agent-vps hermes-dns obsidian-sync
+docker volume rm hermes-restic-cache; docker image prune -a   # built images, their :previous tags, pulled images
 sudo ./orca.sh remove              # if installed (then: sudo userdel -r orca; apt remove nodejs gh; npm -g uninstall the CLIs)
 sudo rm -rf /srv/hermes            # data + every secret
 ```

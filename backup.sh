@@ -78,7 +78,7 @@ MSG
 
 do_run() {
   require_configured
-  lock_stack -n || die "another backup.sh or update.sh is running"
+  lock_stack -w 1800 || die "another backup.sh or update.sh held $STACK_LOCK for 30 min"
 
   # 1. Consistent application-level snapshot (sqlite backup API for state.db), kept under
   #    $HERMES_DATA_DIR/backups so `hermes import <zip>` works on any Hermes install.
@@ -107,6 +107,7 @@ do_restore() {
   require_configured
   local snap="${1:-}" target="${2:-}"
   [ -n "$snap" ] && [ -n "$target" ] || die "usage: $0 restore <snapshot-id|latest> <target-dir>"
+  target="$(realpath -m "$target")"   # a relative dir would become a docker *volume* name
   mkdir -p "$target"
   info "Restoring snapshot $snap under $target (host paths are preserved, e.g. $target$HERMES_DATA_DIR)…"
   restic_run --rw "$target" restore "$snap" --target /restore

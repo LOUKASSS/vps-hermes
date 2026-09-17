@@ -1,6 +1,6 @@
 [Unit]
 Description=Hermes stack update (rebuild on latest base image, pull, recreate; auto-rollback if unhealthy)
-After=docker.service network-online.target hermes-backup.service
+After=docker.service network-online.target
 Wants=network-online.target
 
 [Service]

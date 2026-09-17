@@ -151,7 +151,10 @@ restic_run() {
 # the orphaned netns and kills hermes-dashboard (shared PID ns). Compose orders them itself
 # (depends_on: service_healthy).
 AGENT_GROUP=(hermes-agent hermes-workspace hermes-dashboard)
+# Holds UPDATE_LOCK so heal.sh (every minute) does not "repair" the group mid-recreate. The lock
+# stays with the calling script until it exits (fd 8) — fine, these are short-lived commands.
 restart_agent() {
+  lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
   compose up -d --force-recreate "${AGENT_GROUP[@]}"
   wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
 }
