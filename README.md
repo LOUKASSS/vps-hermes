@@ -53,10 +53,14 @@ they need) and have a read-only root filesystem.
 Run once as root on the fresh VPS, before the stack:
 
 ```bash
+apt-get update && apt-get install -y git     # cloud images ship without git
 git clone <this repo> hermes-setup && cd hermes-setup
-sudo ./harden.sh                 # TS_AUTHKEY=tskey-... sudo ./harden.sh  for non-interactive Tailscale join
-                                 # HARDEN_ASSUME_YES=1 skips the lockout check (only if you verified Tailscale SSH yourself)
+sudo ./harden.sh                 # sudo TS_AUTHKEY=tskey-... ./harden.sh  for a non-interactive Tailscale join
+                                 # sudo HARDEN_ASSUME_YES=1 ./harden.sh  skips the lockout check (only if you verified Tailscale SSH yourself)
 ```
+
+(Variables go *after* `sudo`: `VAR=x sudo cmd` is stripped by sudo's `env_reset`. Same for
+`install.sh`.)
 
 What it does:
 
@@ -73,7 +77,7 @@ What it does:
   `ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>` works from another terminal;
 - then **sshd** hardening: keys only, no root, `AllowUsers hermes`, `MaxAuthTries 3`;
 - **unattended-upgrades** (security + updates + Docker/Tailscale repos), unused-package cleanup,
-  automatic reboot at 04:30 when required, `needrestart` in auto mode;
+  automatic reboot at 02:00 when required (before the 03:00 backup and the Sunday 03:30 update), `needrestart` in auto mode;
 - fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
   rotation), `/srv/hermes` owned by `hermes` with a copy of this repo in `/srv/hermes/stack`.
 
@@ -109,7 +113,8 @@ Re-running it after changes is the normal way to apply them; it recreates `herme
 the containers sharing its namespaces), so running sessions restart. It keeps a `DESKTOP_BIND`
 you set by hand and always re-derives `HERMES_UID/GID` from the `hermes` user.
 
-Open `https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
+After step 2 below (the name only resolves through the tailnet DNS), open
+`https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
 stored in `.env`). The install summary prints secrets: clear the scrollback if the terminal is
 shared or recorded.
 
@@ -123,13 +128,13 @@ resolves to the VPS too — handy for your own projects behind this Traefik (joi
 network, add labels, get a certificate from the same resolver). Then, once, in the
 [Tailscale admin console](https://login.tailscale.com/admin/dns) → DNS:
 
-1. MagicDNS: on.
-2. Nameservers → **Add nameserver → Custom** → the VPS Tailscale IP (`100.x.y.z`) →
-   **Restrict to domain** → `DNS_ZONE`.
+1. Nameservers → **Add nameserver → Custom** → the VPS Tailscale IP (`100.x.y.z`) →
+   **Restrict to domain** → `DNS_ZONE`. (MagicDNS may stay on or off; it is not required.)
+2. On each device, Tailscale's **Use Tailscale DNS settings** must be enabled (the default).
 
 From then on every device on the tailnet (laptop, phone, the VPS itself) resolves
 `https://<WORKSPACE_HOST>` — and only that zone — through the VPS. Check: `sudo ./auth.sh status`
-(dns line), `nslookup <WORKSPACE_HOST>` from your laptop; `docker compose logs hermes-dns`.
+(dns line), `nslookup <WORKSPACE_HOST>` from your laptop; `docker compose logs dns`.
 `install.sh` refuses a `WORKSPACE_HOST` outside `DNS_ZONE` and warns when another resolver already
 owns port 53 on all interfaces (Ubuntu's `systemd-resolved` only binds `127.0.0.53`, no clash).
 
@@ -261,10 +266,10 @@ No remote vault yet: `docker compose --profile obsidian run --rm obsidian-sync s
 sudo ./backup.sh setup       # bucket + application key → .env, generates RESTIC_PASSWORD, init, enables the nightly timer
 sudo ./backup.sh run         # what hermes-backup.timer runs at 03:00 — run the first one by hand, during the day
 sudo ./backup.sh snapshots
-sudo ./backup.sh restore latest /srv/restore
+sudo ./backup.sh restore <id|latest> /srv/restore
 sudo ./backup.sh check       # integrity (reads 5 % of the data)
 sudo ./backup.sh restic <args…>   # raw restic (unlock, ls, dump, key add…)
-journalctl -u hermes-backup  # history
+sudo journalctl -u hermes-backup  # history
 ```
 
 B2: private bucket + an application key restricted to it (`listBuckets, listFiles, readFiles,
@@ -289,9 +294,12 @@ now and then.
 1. `sudo ./harden.sh` (puts this repo in `/srv/hermes/stack`), then as `hermes`:
    `cd /srv/hermes/stack && cp .env.example .env` and add `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`,
    `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`.
-2. `sudo ./install.sh` — installs Docker, asks host / email / CF token, starts an empty stack.
-3. `sudo ./backup.sh restore latest /srv/restore`, then the printed `sudo` lines (stack down,
-   `rsync`/`cp` of `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env`).
+2. `sudo ./install.sh` — installs Docker, asks host / email / CF token, starts an empty stack
+   and, since `.env` has the restic credentials, enables the nightly backup timer: run
+   `sudo systemctl disable --now hermes-backup.timer` right away so the empty stack does not
+   become `latest` before you restore (re-enable it at the end).
+3. `sudo ./backup.sh snapshots`, then `sudo ./backup.sh restore <id> /srv/restore` and the printed
+   `sudo` lines (stack down, `rsync`/`cp` of `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env`).
 4. `sudo ./install.sh` again (re-chowns for this host's `hermes` uid, sets `DESKTOP_BIND`,
    recreates). If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of
    `ORCA_HOME` (pairings, state). Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
@@ -307,7 +315,8 @@ into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backup
   agent runs scripts through its terminal tool. Extra libraries: add a
   `RUN uv pip install --python /opt/hermes/.venv/bin/python <pkg>` line to `hermes/Dockerfile` and
   run `sudo ./update.sh`. The same command from `sudo ./auth.sh shell` works until the next image
-  rebuild.
+  rebuild. Commit such edits to your fork: only `.env` of the checkout is backed up, and `git pull`
+  will not merge over uncommitted changes.
 
 ## Operations
 
@@ -354,9 +363,12 @@ traefik/dashboard/obsidian have fixed limits in the compose file.
 **Updating these scripts:** `cd /srv/hermes/stack && git pull` (as `hermes`, no sudo) then
 `sudo ./install.sh`.
 
-**Logs.** `journalctl -u hermes-backup|hermes-update|hermes-heal|fail2ban`,
-`/var/log/unattended-upgrades/`, container logs via `docker compose logs` (json-file, 20 MB × 5
-per container). Traefik access log is off. There is no monitoring or alerting in this stack.
+**Logs.** `sudo journalctl -u hermes-backup|hermes-update|hermes-heal|orca|fail2ban` (the
+`hermes` user is not in `adm`, hence `sudo`), `/var/log/unattended-upgrades/`, container logs via
+`docker compose logs <service>` (json-file, 20 MB × 5 per container; the DNS is service `dns`).
+Traefik access log is off. There is no monitoring or alerting in this stack. Note that `TZ` in
+`.env` applies to containers and restic only; the timer times above follow the host timezone
+(`timedatectl`).
 
 ### Rotating secrets
 
@@ -367,13 +379,13 @@ per container). Traefik access log is off. There is no monitoring or alerting in
 | `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-dashboard` |
 | `CF_DNS_API_TOKEN` | `docker compose up -d --force-recreate traefik` |
 | `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |
-| SSH key of `hermes` | `sudo /srv/hermes/stack/harden.sh --rotate-key` |
+| SSH key of `hermes` | `sudo /srv/hermes/stack/harden.sh --rotate-key` (a full harden run: apt upgrade, ufw reset + the lockout confirmation with the new key) |
 | Orca pairings | revoke in the app (Shared Server Access) |
 | CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again, then `sudo ./orca.sh creds` if Orca is installed |
 
 Changing `WORKSPACE_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
-(recreates `hermes-dns`, `traefik` and the agent group — the router labels live on
-`hermes-agent`), update the restricted domain of the nameserver in the Tailscale admin console;
+(recreates `hermes-dns` and the agent group — the router labels live on `hermes-agent`, Traefik
+picks them up live), update the restricted domain of the nameserver in the Tailscale admin console;
 the old certificate stays in `acme.json`, harmless.
 
 ### Uninstall
@@ -417,8 +429,8 @@ sudo rm -rf /srv/hermes            # data + every secret
   `systemctl restart docker`.
 
 - **`<WORKSPACE_HOST>` does not resolve** — the device is not using the tailnet DNS: Tailscale
-  admin console → DNS → nameserver `100.x.y.z` restricted to `DNS_ZONE`, MagicDNS on, and on the
-  device Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
+  admin console → DNS → nameserver `100.x.y.z` restricted to `DNS_ZONE`, and on the device
+  Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
   must answer from anywhere on the tailnet.
 - **No certificate / browser warning** — `docker compose logs traefik`; check the Cloudflare zone and the
   token scope (Zone:DNS:Edit + Zone:Zone:Read — "zone could not be found" = Zone:Read missing). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`
@@ -439,7 +451,7 @@ sudo rm -rf /srv/hermes            # data + every secret
 - **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT` (default 10g / 6 CPUs, sized for an 8 vCPU / 16 GB VPS).
 - **Backup failed** — `journalctl -u hermes-backup -n 50`; `sudo ./backup.sh restic unlock` after
   an interrupted run; `sudo ./backup.sh check` to verify the repository. A long first upload can
-  be cut by the 04:30 reboot window: run the first `backup.sh run` by hand.
+  be cut by the 02:00 reboot window: run the first `backup.sh run` by hand.
 - **Workspace 404 / Traefik sees no router** — `docker compose logs docker-socket-proxy traefik`;
   Traefik reaches the Docker API only through the proxy on the internal `docker-api` network.
 - **`hermes-dashboard` exited (137)** — expected right after an agent restart (shared PID

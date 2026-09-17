@@ -191,7 +191,7 @@ EOF
 
 wait_up() {
   for _ in $(seq 1 24); do
-    curl -fsS -o /dev/null "http://127.0.0.1:$ORCA_PORT/" 2>/dev/null && return 0
+    curl -sS -o /dev/null "http://127.0.0.1:$ORCA_PORT/" 2>/dev/null && return 0   # any HTTP answer = up
     systemctl is-active -q orca || { journalctl -u orca -n 30 --no-pager -o cat; die "orca.service died"; }
     sleep 5
   done

@@ -38,15 +38,17 @@ load_env() {
 no_symlink() { local p; for p in "$@"; do [ ! -L "$p" ] || die "$p is a symlink — refusing to touch it (check the data dir for tampering)"; done; }
 
 # set_env KEY VALUE — write/replace KEY in .env (VALUE is stored literally: no quoting, one line)
+# set_env KEY VALUE [file] — replace or append KEY=VALUE (default file: the stack .env).
 set_env() {
-  local key="$1" val="$2" esc
+  local key="$1" val="$2" f="${3:-$STACK_DIR/.env}" esc
   case "$val" in *$'\n'*) die "set_env $key: value must be a single line" ;; esac
-  if grep -q "^${key}=" "$STACK_DIR/.env"; then
+  if grep -qs "^${key}=" "$f"; then
     # escape what sed would interpret in the replacement: \, & and our | delimiter
     esc="${val//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//|/\\|}"
-    sed -i "s|^${key}=.*|${key}=${esc}|" "$STACK_DIR/.env"
+    sed -i "s|^${key}=.*|${key}=${esc}|" "$f"
   else
-    printf '%s=%s\n' "$key" "$val" >> "$STACK_DIR/.env"
+    [ ! -s "$f" ] || [ -z "$(tail -c1 "$f")" ] || echo >> "$f"   # file must end with a newline
+    printf '%s=%s\n' "$key" "$val" >> "$f"
   fi
 }
 # env_val KEY — current value in .env (empty if unset)
@@ -74,12 +76,12 @@ compose() {
 # Locks (flock on fd 9 / fd 8). STACK_LOCK serialises backup.sh and update.sh (they both touch the
 # containers and the data dir); UPDATE_LOCK is held by update.sh only, heal.sh skips while it is
 # held so it does not fight a recreate in progress.
-STACK_LOCK=/tmp/hermes-stack.lock
-UPDATE_LOCK=/tmp/hermes-update.lock
+STACK_LOCK=/run/lock/hermes-stack.lock
+UPDATE_LOCK=/run/lock/hermes-update.lock
 # lock_stack [-n|-w <secs>] — fd 9
 lock_stack() { exec 9>"$STACK_LOCK"; flock "${@:--w 10800}" 9; }
 # lock_update [-n] — fd 8
-lock_update() { exec 8>"$UPDATE_LOCK"; flock "${@:--n}" 8; }
+lock_update() { exec 8>"$UPDATE_LOCK"; flock "${@:--n}" 8 && UPDATE_LOCKED=1; }
 
 # Files that switch the automation off:
 #   .maintenance  → heal.sh does nothing (touch it before `docker compose stop <service>`)
@@ -154,7 +156,7 @@ AGENT_GROUP=(hermes-agent hermes-workspace hermes-dashboard)
 # Holds UPDATE_LOCK so heal.sh (every minute) does not "repair" the group mid-recreate. The lock
 # stays with the calling script until it exits (fd 8) — fine, these are short-lived commands.
 restart_agent() {
-  lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
+  [ "${UPDATE_LOCKED:-}" = 1 ] || lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
   compose up -d --force-recreate "${AGENT_GROUP[@]}"
   wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
 }

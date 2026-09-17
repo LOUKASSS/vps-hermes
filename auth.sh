@@ -33,16 +33,12 @@ do_claude_token() {
   info "Alternative: long-lived token via 'claude setup-token' (Claude Max). Open the URL on your laptop, approve, paste the code back."
   agent_exec claude setup-token
   echo
-  read -r -p "Paste the token here to store it as CLAUDE_CODE_OAUTH_TOKEN for Hermes (Enter to skip): " tok
+  read -r -s -p "Paste the token here to store it as CLAUDE_CODE_OAUTH_TOKEN for Hermes (Enter to skip): " tok; echo
   if [ -n "$tok" ]; then
     envf="$HERMES_DATA_DIR/.env"
     no_symlink "$envf"
     touch "$envf"; chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
-    if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' "$envf"; then
-      sed -i "s|^CLAUDE_CODE_OAUTH_TOKEN=.*|CLAUDE_CODE_OAUTH_TOKEN=${tok}|" "$envf"
-    else
-      printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$tok" >> "$envf"
-    fi
+    set_env CLAUDE_CODE_OAUTH_TOKEN "$tok" "$envf"
     info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard"
   fi
 }

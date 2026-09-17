@@ -58,9 +58,11 @@ if ! id "$OP_USER" >/dev/null 2>&1; then
 fi
 groupadd -f docker
 usermod -aG sudo,docker "$OP_USER"
-printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$OP_USER" > /etc/sudoers.d/90-"$OP_USER"
-chmod 440 /etc/sudoers.d/90-"$OP_USER"
-visudo -cf /etc/sudoers.d/90-"$OP_USER" >/dev/null
+# Validate before installing: a bad fragment in sudoers.d breaks sudo for everyone.
+_sudoers="$(mktemp)"
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$OP_USER" > "$_sudoers"
+visudo -cf "$_sudoers" >/dev/null || { rm -f "$_sudoers"; die "sudoers fragment for $OP_USER did not validate"; }
+install -m 440 -o root -g root "$_sudoers" /etc/sudoers.d/90-"$OP_USER"; rm -f "$_sudoers"
 
 OP_HOME="$(getent passwd "$OP_USER" | cut -d: -f6)"
 install -d -m 700 -o "$OP_USER" -g "$OP_USER" "$OP_HOME/.ssh"
@@ -153,7 +155,7 @@ Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
-Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+Unattended-Upgrade::Automatic-Reboot-Time "02:00";
 Unattended-Upgrade::SyslogEnable "true";
 APT
 systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null
@@ -213,8 +215,11 @@ systemctl enable --now tailscaled >/dev/null
 if ! tailscale status >/dev/null 2>&1; then
   if [ -n "${TS_AUTHKEY:-}" ]; then
     info "Joining tailnet with TS_AUTHKEY"
-    tailscale up --auth-key="$TS_AUTHKEY" --hostname="$(hostname)"
+    # file: keeps the key off the process list; the file is removed right after.
+    _tsk="$(mktemp)"; printf '%s' "$TS_AUTHKEY" > "$_tsk"
+    tailscale up --auth-key="file:$_tsk" --hostname="$(hostname)"; rm -f "$_tsk"
   else
+    [ -t 0 ] || die "no terminal and no TS_AUTHKEY: cannot join the tailnet interactively (sudo TS_AUTHKEY=tskey-… ./harden.sh)"
     info "Joining tailnet — open the URL below in your browser and approve this machine."
     tailscale up --hostname="$(hostname)"
   fi
@@ -264,6 +269,7 @@ add_docker_user_block /etc/ufw/after6.rules
 
 # Anti-lockout guard: if you don't confirm below within 10 minutes, ufw turns itself off.
 systemctl stop ufw-lockout-guard.timer ufw-lockout-guard.service >/dev/null 2>&1 || true
+systemctl reset-failed ufw-lockout-guard.timer ufw-lockout-guard.service >/dev/null 2>&1 || true
 systemd-run --quiet --unit=ufw-lockout-guard --on-active=10min /usr/sbin/ufw disable
 ufw --force enable >/dev/null
 systemctl enable ufw >/dev/null 2>&1 || true
@@ -332,7 +338,8 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 SSHD
 sshd -t || die "sshd config test failed — drop-in left at /etc/ssh/sshd_config.d/00-hermes-hardening.conf, sshd NOT reloaded."
-systemctl reload ssh 2>/dev/null || systemctl reload sshd
+# 24.04 socket-activates ssh.service: it may be inactive (nothing to reload) when run from a console.
+systemctl try-reload-or-restart ssh.service 2>/dev/null || systemctl try-reload-or-restart sshd.service
 
 if [ "$NEW_KEY" = 1 ] && [ "$KEEP_KEY" != 1 ]; then
   shred -u "$KEY_FILE" 2>/dev/null || rm -f "$KEY_FILE"

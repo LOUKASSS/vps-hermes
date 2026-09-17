@@ -3,8 +3,8 @@
 #
 #   sudo ./install.sh
 #
-# Non-interactive: pre-fill WORKSPACE_HOST, ACME_EMAIL, CF_DNS_API_TOKEN in .env
-# (or export them) and the script will not prompt.
+# Non-interactive: pre-fill WORKSPACE_HOST, ACME_EMAIL, CF_DNS_API_TOKEN in .env (or pass them
+# through sudo: `sudo WORKSPACE_HOST=… ./install.sh`) and the script will not prompt.
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -40,10 +40,6 @@ ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" sec
 _zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
 [ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
 case "$_host" in "$_zone"|*".$_zone") ;; *) die "WORKSPACE_HOST=$_host is not under DNS_ZONE=$_zone (fix DNS_ZONE in .env)." ;; esac
-# Port 53 is published on the Tailscale IP; a resolver bound to 0.0.0.0 (or that IP) would clash.
-if ss -lunH 'sport = :53' 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]|100\.)'; then
-  warn "something already listens on :53 for all interfaces ($(ss -lunpH 'sport = :53' | awk '{print $4, $NF}' | head -n1)) — the dns service will fail to start until it is moved/stopped."
-fi
 
 # The gateway api_server refuses keys shorter than 16 chars.
 _key="$(env_val API_SERVER_KEY)"
@@ -65,6 +61,11 @@ if [ -n "$TS_IP" ]; then
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
   warn "No Tailscale IP found: Traefik (80/443), Desktop backend (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+fi
+# Port 53 is published on DESKTOP_BIND; a resolver bound to 0.0.0.0 or to that same IP would clash.
+_bind="$(env_val DESKTOP_BIND)"
+if ss -lunH 'sport = :53' 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]|${_bind//./\\.}):"; then
+  warn "something already listens on ${_bind}:53 ($(ss -lunpH 'sport = :53' | awk '{print $4, $NF}' | head -n1)) — the dns service will fail to start until it is moved/stopped."
 fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
@@ -138,7 +139,7 @@ cat <<MSG
   Workspace URL : https://${WORKSPACE_HOST}   (tailnet only)
   Tailnet DNS   : ${DESKTOP_BIND}:53 answers ${DNS_ZONE} and *.${DNS_ZONE} → ${DESKTOP_BIND}
                   Tailscale admin console → DNS → Nameservers → Add nameserver → Custom → ${DESKTOP_BIND},
-                  "Restrict to domain" → ${DNS_ZONE}   (MagicDNS on). Then every tailnet device resolves the URL.
+                  "Restrict to domain" → ${DNS_ZONE}. Then every tailnet device resolves the URL.
   Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
   Hermes Desktop: Settings → Gateways → Remote gateway → http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}
                   user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)

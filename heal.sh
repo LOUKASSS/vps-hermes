@@ -18,12 +18,14 @@ lock_update -n || exit 0
 
 mapfile -t rows < <(compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Health}}')
 [ "${#rows[@]}" -gt 0 ] || exit 0
+enabled="$(compose config --format json 2>/dev/null | python3 -c 'import json,sys; print(" ".join(s.get("container_name", n) for n, s in json.load(sys.stdin)["services"].items()))' 2>/dev/null || true)"
+[ -n "$enabled" ] || enabled="$(printf '%s\n' "${rows[@]}" | cut -f1 | tr '\n' ' ')"   # config unreadable: consider all
 running=0; unhealthy=(); stopped=()
 for row in "${rows[@]}"; do
   IFS=$'\t' read -r name state health <<<"$row"
   case "$state" in
     running) running=$((running + 1)); [ "$health" = unhealthy ] && unhealthy+=("$name") ;;
-    exited|created|dead) stopped+=("$name") ;;
+    exited|created|dead) case " $enabled " in *" $name "*) stopped+=("$name") ;; esac ;;   # not a disabled profile's leftover
   esac
 done
 [ "$running" -gt 0 ] || exit 0   # whole stack down: leave it alone
@@ -40,5 +42,5 @@ for name in "${unhealthy[@]}"; do
 done
 if [ "${#stopped[@]}" -gt 0 ]; then
   info "heal: stopped: ${stopped[*]} → docker compose up -d"
-  compose up -d --no-recreate >/dev/null 2>&1 || warn "heal: compose up failed"
+  compose up -d --no-recreate >/dev/null || warn "heal: compose up failed"
 fi

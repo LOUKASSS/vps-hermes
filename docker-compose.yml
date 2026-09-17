@@ -91,7 +91,7 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     # Static config as flags only: Traefik reads ONE static source (file > CLI > env), so an
-    # acme.email flag next to --configfile would be ignored. traefik/traefik.yml documents it.
+    # acme.email flag next to --configfile would be ignored.
     command:
       - --api.dashboard=false
       - --log.level=INFO
