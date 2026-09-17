@@ -322,11 +322,12 @@ fi
 cat <<MSG
 
 Done. Next steps:
-  1. Cloudflare DNS: create an A record  <WORKSPACE_HOST> → $TS_IP  (DNS only, grey cloud).
-     The workspace is reachable only from your tailnet; TLS still works via DNS-01.
-  2. Log in as the operator and start the stack:
+  1. Log in as the operator and start the stack:
        ssh -i ~/.ssh/hermes_vps $OP_USER@$TS_IP
        cd /srv/hermes/stack && sudo ./install.sh && sudo ./auth.sh
+     No public DNS record needed: the stack's own DNS answers <WORKSPACE_HOST> for the tailnet.
+  2. Tailscale admin console → DNS → Nameservers → Add → Custom → $TS_IP, "Restrict to domain" →
+     your DNS_ZONE (install.sh prints it). TLS still works via the Cloudflare DNS-01 challenge.
   3. If you run 'ufw reload' later, also run 'systemctl restart docker' (ufw flushes Docker's chains).
   4. Tailscale admin console → this machine → "Disable key expiry". Otherwise the node key
      expires after 180 days and, with SSH closed on the WAN, you are locked out.
