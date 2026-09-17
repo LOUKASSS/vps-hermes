@@ -226,7 +226,8 @@ ufw logging low >/dev/null
 
 # Docker publishes ports through its own iptables chains, bypassing ufw's INPUT rules.
 # Docker consults the DOCKER-USER chain first, so we pre-create it via ufw's after.rules:
-# accept from the tailnet and established flows, drop NEW connections arriving on the WAN NIC.
+# accept from the tailnet, from the containers' own bridges and established flows, drop every
+# other NEW connection — whatever NIC it comes in on (WAN, a provider's private network, …).
 add_docker_user_block() {
   local file="$1"
   sed -i '/^# BEGIN HERMES DOCKER-USER/,/^# END HERMES DOCKER-USER/d' "$file"
@@ -235,8 +236,10 @@ add_docker_user_block() {
 *filter
 :DOCKER-USER - [0:0]
 -A DOCKER-USER -i tailscale0 -j RETURN
+-A DOCKER-USER -i docker0 -j RETURN
+-A DOCKER-USER -i br-+ -j RETURN
 -A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
--A DOCKER-USER -i ${WAN_IF} -m conntrack --ctstate NEW -j DROP
+-A DOCKER-USER -m conntrack --ctstate NEW -j DROP
 -A DOCKER-USER -j RETURN
 COMMIT
 # END HERMES DOCKER-USER

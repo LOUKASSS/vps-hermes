@@ -29,7 +29,10 @@ gateway API stay loopback-only (no auth gate, no exposure) while the workspace s
 them. Nothing is reachable from the Internet: Traefik (80/443), the Desktop backend, the DNS and
 Orca all bind the Tailscale IP (`DESKTOP_BIND`), and `harden.sh`'s firewall (default deny, allow
 on `tailscale0`) is the second layer. Traefik reads container labels through
-`docker-socket-proxy` (GET-only view of the Docker API) instead of the raw socket.
+`docker-socket-proxy` (GET-only view of the Docker API: containers, events, version — no `/info`,
+no POST) instead of the raw socket. Every container runs with `no-new-privileges` and a
+`pids_limit`; traefik, the socket proxy and the DNS drop all capabilities (plus the one or two
+they need) and have a read-only root filesystem.
 
 ## Prerequisites
 
@@ -217,8 +220,10 @@ printed browser URL (`http://<tailscale-ip>:6768/web-index.html#pairing=…`) al
 browser on the tailnet. **Treat the link like a root password**: whoever holds it runs commands as
 `orca` (passwordless sudo, docker group). Orca listens on `ORCA_PORT` (6768), advertises
 `DESKTOP_BIND` (the Tailscale IP) to clients, and the firewall from `harden.sh` keeps it off the
-Internet. Orca state (projects, pairings, secrets — unencrypted, no keyring) lives in
-`ORCA_HOME/.config/orca`; `ORCA_HOME` is part of the backups when it exists.
+Internet. Orca prints the link on every start, so it also sits in `journalctl -u orca` (root /
+`adm` readable, kept up to a month); `orca.sh` only echoes it to a terminal, never into the
+`hermes-update` journal. Orca state (projects, pairings, secrets — unencrypted, no keyring) lives
+in `ORCA_HOME/.config/orca`; `ORCA_HOME` is part of the backups when it exists.
 
 Layout: `/opt/orca/<tag>/` (extracted AppImage, sha512-verified against the release manifest),
 `/opt/orca/current` and `/opt/orca/previous` symlinks, `/usr/local/bin/orca`, `/etc/sudoers.d/91-orca`,

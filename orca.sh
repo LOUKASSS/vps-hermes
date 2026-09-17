@@ -226,7 +226,8 @@ restart_and_pair() {
   info "Waiting for Orca (up to 2 min)…"
   wait_up || { journalctl -u orca -n 40 --no-pager -o cat; die "orca did not come up on :$ORCA_PORT"; }
   sleep 3
-  print_pairing "$since"
+  # Unattended (update.sh timer): do not copy the pairing link into another unit's journal.
+  if [ -t 1 ]; then print_pairing "$since"; else info "Orca restarted; paired devices keep working. New link: sudo $0 pair"; fi
 }
 
 # ── commands ─────────────────────────────────────────────────────────────

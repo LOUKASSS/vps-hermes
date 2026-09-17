@@ -36,6 +36,7 @@ do_claude_token() {
   read -r -p "Paste the token here to store it as CLAUDE_CODE_OAUTH_TOKEN for Hermes (Enter to skip): " tok
   if [ -n "$tok" ]; then
     envf="$HERMES_DATA_DIR/.env"
+    no_symlink "$envf"
     touch "$envf"; chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
     if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' "$envf"; then
       sed -i "s|^CLAUDE_CODE_OAUTH_TOKEN=.*|CLAUDE_CODE_OAUTH_TOKEN=${tok}|" "$envf"
@@ -129,6 +130,7 @@ do_obsidian() {
   info "Obsidian Sync headless client (requires an Obsidian Sync subscription)."
   info "Vault: host $HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR  = agent /workspace/$OBSIDIAN_VAULT_DIR  = sync client /vault"
   mkdir -p "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
+  no_symlink "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
   chown "$HERMES_UID:$HERMES_GID" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
   compose --profile obsidian build --pull obsidian-sync
   obsidian_exec login

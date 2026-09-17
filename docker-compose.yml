@@ -34,6 +34,10 @@ x-logging: &logging
     max-size: "20m"
     max-file: "5"
 
+# No process may gain privileges through setuid binaries or file capabilities (s6-overlay and
+# haproxy drop to their users with plain syscalls, which this does not block).
+x-nnp: &nnp ["no-new-privileges:true"]
+
 services:
   # Traefik only needs to *read* container labels. A raw docker.sock mount (even :ro) is full
   # Docker API access = root on the host if Traefik is ever compromised; the proxy exposes GET
@@ -44,13 +48,21 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 64m
+    pids_limit: 64
+    security_opt: *nnp
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp, /run]
+    # Traefik's docker provider uses /version, /containers/*, /events; /info (host details)
+    # and /networks are not needed. Note: /containers/{id}/json still returns every container's
+    # environment, i.e. the stack secrets — Traefik is the one client and must stay trusted.
     environment:
       CONTAINERS: "1"
-      NETWORKS: "1"
+      NETWORKS: "0"
       EVENTS: "1"
       VERSION: "1"
       PING: "1"
-      INFO: "1"
+      INFO: "0"
       POST: "0"
       LOG_LEVEL: warning
     volumes:
@@ -69,8 +81,15 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 256m
+    pids_limit: 256
+    security_opt: *nnp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs: [/tmp]
     depends_on:
-      - docker-socket-proxy
+      docker-socket-proxy:
+        condition: service_healthy
     # Static config as flags only: Traefik reads ONE static source (file > CLI > env), so an
     # acme.email flag next to --configfile would be ignored. traefik/traefik.yml documents it.
     command:
@@ -120,7 +139,10 @@ services:
     command: ["gateway", "run"]
     shm_size: 1g
     mem_limit: ${AGENT_MEM_LIMIT:-10g}
+    memswap_limit: ${AGENT_MEM_LIMIT:-10g}   # = mem_limit: no swap on top
     cpus: ${AGENT_CPUS:-6}
+    pids_limit: 4096   # LLM-driven shells: a fork bomb stays inside the container
+    security_opt: *nnp
     environment:
       <<: *hermes-uid
       HERMES_DASHBOARD: "1"
@@ -161,6 +183,9 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: ${WORKSPACE_MEM_LIMIT:-3g}
+    memswap_limit: ${WORKSPACE_MEM_LIMIT:-3g}
+    pids_limit: 1024
+    security_opt: *nnp
     network_mode: "service:hermes-agent"
     depends_on:
       hermes-agent:
@@ -207,6 +232,9 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 512
+    security_opt: *nnp
     init: true
     network_mode: "service:hermes-agent"
     pid: "container:hermes-agent"
@@ -244,6 +272,12 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 32m
+    pids_limit: 32
+    security_opt: *nnp
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]   # bind :53 as root, then drop to user=dnsmasq
+    read_only: true
+    tmpfs: [/etc/dnsmasq.d, /run]   # entrypoint.sh renders zone.conf; pid file
     environment:
       DNS_ZONE: ${DNS_ZONE:-${WORKSPACE_HOST}}
       DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
@@ -273,6 +307,9 @@ services:
     restart: unless-stopped
     logging: *logging
     mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
+    security_opt: *nnp
     profiles: ["obsidian"]
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
     environment:

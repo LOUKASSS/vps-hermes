@@ -17,19 +17,25 @@ need_root() {
   [ "${EUID:-$(id -u)}" -eq 0 ] || die "Run as root (sudo $0)."
 }
 
+# .env is sourced, not exported wholesale: only the restic/B2 variables restic_run passes with
+# `-e NAME` are exported, so child processes (npm, apt, curl|sh installers, docker build) never
+# inherit the CF token, API key or passwords. compose reads .env itself.
 load_env() {
   [ -f "$STACK_DIR/.env" ] || die "Missing $STACK_DIR/.env — run ./install.sh first."
-  set -a
+  ! grep -q $'\r' "$STACK_DIR/.env" || die "$STACK_DIR/.env has CRLF line endings (edited on Windows?): sed -i 's/\\r\$//' .env"
   # shellcheck disable=SC1091
   . "$STACK_DIR/.env"
-  set +a
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
   : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
   : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=/srv/hermes/orca}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
   [ -n "${RESTIC_REPOSITORY:-}" ] || RESTIC_REPOSITORY="b2:${B2_BUCKET:-}:hermes"
-  export RESTIC_REPOSITORY RESTIC_IMAGE
+  export RESTIC_REPOSITORY RESTIC_IMAGE RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" B2_ACCOUNT_ID="${B2_ACCOUNT_ID:-}" B2_ACCOUNT_KEY="${B2_ACCOUNT_KEY:-}"
 }
+
+# no_symlink <path>… — refuse to chmod/chown/write through a path the agent container could have
+# replaced with a symlink (it owns everything under its bind mounts).
+no_symlink() { local p; for p in "$@"; do [ ! -L "$p" ] || die "$p is a symlink — refusing to touch it (check the data dir for tampering)"; done; }
 
 # set_env KEY VALUE — write/replace KEY in .env (VALUE is stored literally: no quoting, one line)
 set_env() {
