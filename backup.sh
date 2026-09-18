@@ -48,11 +48,15 @@ do_setup() {
   chmod 600 "$STACK_DIR/.env"
   load_env
 
-  if restic_run cat config >/dev/null 2>&1; then
+  local err
+  if err="$(restic_run cat config 2>&1 >/dev/null)"; then
     info "Repository $RESTIC_REPOSITORY already initialised — reusing it."
-  else
+  elif printf '%s' "$err" | grep -qiE 'Is there a repository|does not exist|no such|not found'; then
     info "Initialising repository $RESTIC_REPOSITORY…"
     restic_run init
+  else
+    die "cannot open $RESTIC_REPOSITORY (wrong key, bucket or password?):
+$err"
   fi
 
   if [ -f /etc/systemd/system/hermes-backup.timer ]; then

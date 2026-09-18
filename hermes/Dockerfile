@@ -4,12 +4,12 @@
 FROM nousresearch/hermes-agent:latest
 
 USER root
-ENV DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND=noninteractive
 
 # GitHub CLI (official apt repo) + a few operator conveniences
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-        gnupg tmux jq less nano && \
+        tmux jq less nano && \
     install -d -m 0755 /etc/apt/keyrings && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \

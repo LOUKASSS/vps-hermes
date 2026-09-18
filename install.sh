@@ -40,6 +40,8 @@ ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" sec
 _zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
 [ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
 case "$_host" in "$_zone"|*".$_zone") ;; *) die "WORKSPACE_HOST=$_host is not under DNS_ZONE=$_zone (fix DNS_ZONE in .env)." ;; esac
+# The zone is answered as a wildcard: an apex (example.com) would hijack mail./www. for the tailnet.
+case "$_zone" in *.*.*) ;; *) warn "DNS_ZONE=$_zone looks like a registrable apex: every *.$_zone (www, mail…) will resolve to this VPS for tailnet devices. Prefer a subdomain, e.g. hermes.$_zone." ;; esac
 
 # The gateway api_server refuses keys shorter than 16 chars.
 _key="$(env_val API_SERVER_KEY)"

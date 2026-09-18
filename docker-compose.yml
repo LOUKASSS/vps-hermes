@@ -219,12 +219,12 @@ services:
   # Second dashboard instance for Hermes Desktop (Settings → Gateways → Remote gateway →
   # http://<tailscale-ip>:9120, username/password). The loopback dashboard above has no auth
   # gate (the workspace needs it that way) and rejects remote clients; a non-loopback bind
-  # engages the gate, so Desktop gets its own instance. `init: true` makes tini PID 1, which
-  # sends the image entrypoint down its non-s6 path: no supervision tree, no profile
-  # reconciler, hence no second gateway on the shared data dir. Shares the agent's PID
-  # namespace so gateway-liveness detection works (that also means it is killed whenever
-  # hermes-agent restarts; heal.sh starts it again). API_SERVER_KEY must be passed or the
-  # bootstrap would generate one into /opt/data/.env and shadow the gateway's key.
+  # engages the gate, so Desktop gets its own instance. Sharing the agent's PID namespace
+  # (needed for gateway-liveness detection) means the image entrypoint is never PID 1 and takes
+  # its non-s6 path: no supervision tree, no profile reconciler, hence no second gateway on the
+  # shared data dir (`init: true` stays as a zombie reaper). It is killed whenever hermes-agent
+  # restarts; heal.sh starts it again. API_SERVER_KEY must be passed or the bootstrap would
+  # generate one into /opt/data/.env and shadow the gateway's key.
   hermes-dashboard:
     image: hermes-agent-vps:latest
     pull_policy: never   # built by the hermes-agent service
@@ -278,6 +278,7 @@ services:
     cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]   # bind :53 as root, then drop to user=dnsmasq
     read_only: true
     tmpfs: [/etc/dnsmasq.d, /run]   # entrypoint.sh renders zone.conf; pid file
+    networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
       DNS_ZONE: ${DNS_ZONE:-${WORKSPACE_HOST}}
       DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
@@ -325,3 +326,9 @@ networks:
   docker-api:
     name: docker-api
     internal: true
+  dns:
+    name: hermes-dns
+    # Not `internal` (that would drop the published :53); no masquerading instead, so the
+    # container's packets to the Internet never get a route back.
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

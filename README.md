@@ -68,7 +68,10 @@ What it does:
   **ed25519 key pair**, installs the public key and **prints both keys once** — save the private
   key as `~/.ssh/hermes_vps` on your laptop; it is shredded from the server afterwards
   (`--keep-key` to retain, `--rotate-key` to regenerate);
-- installs **Tailscale** and joins your tailnet (interactive URL, or `TS_AUTHKEY`);
+- installs **Tailscale** and joins your tailnet (interactive URL, or `TS_AUTHKEY`). Every
+  tailnet device then reaches SSH, Traefik, the Desktop backend and Orca on this node: on a
+  shared tailnet, restrict that with a Tailscale ACL (e.g. only your own tagged devices to
+  `tcp:22,443,6768,9120` of this host);
 - **ufw**: deny in by default, allow everything on `tailscale0`, only UDP 41641 on the WAN NIC;
   a `DOCKER-USER` block makes Docker-published ports unreachable from the Internet even if one
   were ever bound to 0.0.0.0 (they all bind the Tailscale IP) but reachable from the tailnet
@@ -398,10 +401,14 @@ docker volume rm hermes-restic-cache; docker image prune -a   # built images, th
 sudo ./orca.sh remove              # if installed (then: sudo userdel -r orca; apt remove nodejs gh; npm -g uninstall the CLIs)
 sudo rm -rf /srv/hermes            # data + every secret
 ```
-`harden.sh` leftovers if you want the host back to stock: `/etc/ufw/after*.rules` (HERMES block),
-`/etc/ssh/sshd_config.d/00-hermes-hardening.conf`, `/etc/sudoers.d/90-hermes`,
-`/etc/apt/apt.conf.d/52-hermes-unattended`, `/etc/fail2ban/jail.d/sshd.local`,
-`/etc/sysctl.d/90-hardening.conf`, `/etc/docker/daemon.json`, user `hermes`, Tailscale.
+`harden.sh` leftovers if you want the host back to stock: `ufw --force reset` (the HERMES block
+in `/etc/ufw/after*.rules` included), `/etc/ssh/sshd_config.d/00-hermes-hardening.conf`,
+`/etc/sudoers.d/90-hermes`, `/etc/apt/apt.conf.d/20auto-upgrades` + `52-hermes-unattended`,
+`/etc/fail2ban/jail.d/sshd.local`, `/etc/sysctl.d/90-hardening.conf`,
+`/etc/systemd/journald.conf.d/90-limits.conf`, `/etc/needrestart/conf.d/90-auto.conf`,
+`/etc/docker/daemon.json`, `/root/hermes-ssh/`, the Tailscale and GitHub CLI apt repos +
+keyrings, user `hermes`, Tailscale itself. `orca.sh install` also left NodeSource's repo,
+Node, Xvfb and the Electron libraries.
 
 ## Layout
 

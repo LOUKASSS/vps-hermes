@@ -1,6 +1,12 @@
 # Hermes Agent VPS Stack — Design
 
-Date: 2026-09-15
+Date: 2026-09-15 — a living log: the original design, then dated addenda. Where an addendum
+contradicts an earlier section, the later one is current. In particular, superseded today:
+the "Internet ──443──▶ traefik" topology and the raw-socket / `traefik.yml` details of
+*Architecture* (now tailnet-only, socket proxy, flags), the public A record in the
+`harden.sh` addendum (tailnet DNS), and the whole "Orca remote server (2026-09-16)" addendum
+(Orca is on the host as user `orca`, see the 2026-09-17 addendum). README.md is the reference
+for what the code does now.
 
 ## Goal
 
@@ -231,7 +237,7 @@ Tailscale IP. `API_SERVER_KEY` is passed to it too, otherwise the bootstrap gene
   `hermes gateway setup` (container-aware upstream: no service install) and recreates the agent
   with `compose up -d --force-recreate` — a plain `restart` orphans the netns-joined containers.
 
-## Addendum — Orca remote server (2026-09-16)
+## Addendum — Orca remote server (2026-09-16) — SUPERSEDED, see "Orca moved to the host" and 2026-09-17
 
 Option B chosen over a host install: `orca` compose service (profile `orca`) built
 `FROM base` where `base` is the compose named context `service:hermes-agent` (so it reuses

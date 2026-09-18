@@ -136,7 +136,7 @@ restic_run() {
   [ -t 0 ] && tty=(-it)
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
   [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
-  docker run --rm "${tty[@]}" "${rw[@]}" --name hermes-restic --hostname hermes-vps \
+  docker run --rm "${tty[@]}" "${rw[@]}" --name "hermes-restic-$$" --hostname hermes-vps \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e B2_ACCOUNT_ID -e B2_ACCOUNT_KEY \
     -e RESTIC_CACHE_DIR=/cache -e TZ="${TZ:-UTC}" \
     -v hermes-restic-cache:/cache \
