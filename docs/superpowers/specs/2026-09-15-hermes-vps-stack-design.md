@@ -338,3 +338,14 @@ Also from the review: Traefik's 80/443 now bind `DESKTOP_BIND` like every other 
 silently; `orca_resolve_version` survives a GitHub outage; `auth.sh` validates the target before
 running it (the `run_target || die` form had disabled `set -e` inside every `do_*`); the
 Cloudflare token needs Zone:Zone:Read in addition to Zone:DNS:Edit.
+
+## Addendum — PostgreSQL (2026-09-18)
+
+`postgres` service (`postgres:17-alpine`, container `hermes-postgres`, 512 MB, data checksums,
+hardened like the rest) on a dedicated `hermes-data` network the agent joins; published on
+`DESKTOP_BIND:5432` for tailnet clients. The agent image gets `postgresql-client` and the libpq
+variables + `DATABASE_URL` in its environment, so the agent can keep the operator's structured
+data (weight, training…) in tables without any extra setup. Live data dir under
+`POSTGRES_DIR/data` (bind mount, postgres-owned); `backup.sh` takes a `pg_dumpall --clean` into
+`POSTGRES_DIR/dumps` (7 kept) which restic uploads instead of the live dir. `install.sh`
+generates `POSTGRES_PASSWORD`. Other compose projects may join `hermes-data` (external network).

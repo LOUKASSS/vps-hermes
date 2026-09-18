@@ -50,6 +50,9 @@ _key="$(env_val API_SERVER_KEY)"
 [ -n "$(env_val DESKTOP_PASSWORD)" ] || set_env DESKTOP_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_SECRET)" ]   || set_env DESKTOP_SECRET "$(openssl rand -base64 32 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_USERNAME)" ] || set_env DESKTOP_USERNAME admin
+[ -n "$(env_val POSTGRES_USER)" ]    || set_env POSTGRES_USER hermes
+[ -n "$(env_val POSTGRES_DB)" ]      || set_env POSTGRES_DB hermes
+[ -n "$(env_val POSTGRES_PASSWORD)" ] || set_env POSTGRES_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 # Publish the Desktop backend / Orca on the Tailscale IP when the VPS is on a tailnet. A value
 # you set yourself (anything but empty/loopback/a stale Tailscale IP) is kept.
 TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
@@ -84,8 +87,10 @@ fi
 load_env
 
 # ── 3. Host storage ──────────────────────────────────────────────────────
-info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}"
+info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}, ${POSTGRES_DIR}"
 mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
+# data/ is chowned to the postgres user by the image's entrypoint; dumps/ is written by backup.sh (root).
+mkdir -p "$POSTGRES_DIR/data" "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR" "$POSTGRES_DIR/dumps"
 no_symlink "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
 touch "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
 chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
@@ -145,6 +150,7 @@ cat <<MSG
   Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
   Hermes Desktop: Settings → Gateways → Remote gateway → http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}
                   user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)
+  PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
   Backups       : ${backup_note}

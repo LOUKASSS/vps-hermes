@@ -110,6 +110,8 @@ do_status() {
   else
     echo "not configured (run: $STACK_DIR/backup.sh setup)"
   fi
+  echo; echo "── postgres ──"
+  echo "hermes-postgres: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-postgres 2>/dev/null || echo 'not created')  db ${POSTGRES_DB} user ${POSTGRES_USER} → ${DESKTOP_BIND:-?}:${POSTGRES_PORT:-5432} (tailnet), hermes-postgres:5432 (agent)  last dump: $(ls -1t "$POSTGRES_DIR"/dumps/pg_dumpall-*.sql.gz 2>/dev/null | head -n1 | xargs -r basename)"
   echo; echo "── dns ──"
   echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$WORKSPACE_HOST} + *.${DNS_ZONE:-$WORKSPACE_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"

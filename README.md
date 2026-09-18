@@ -2,7 +2,8 @@
 
 Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace) behind Traefik
 (HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
-subscriptions (no API keys), `gh`, Python 3.13, an optional Obsidian Sync sidecar,
+subscriptions (no API keys), `gh`, Python 3.13, a PostgreSQL database for your own structured
+data (weight, training logs…), an optional Obsidian Sync sidecar,
 host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
 weekly auto-updates, a self-healing timer, and an optional [Orca](https://www.onorca.dev) remote
 server **on the host** to drive the same CLIs yourself, from desktop or phone — as its own user,
@@ -14,6 +15,7 @@ Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-w
                     │                        ├ :8642 gateway API   (127.0.0.1 only)
                     └▶ docker-socket-proxy   ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
 Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
+Tailnet ──5432──▶ hermes-postgres  (PostgreSQL 17: your tables; the agent reaches it as hermes-postgres:5432)
 Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/codex/grok yourself, from the Orca desktop/mobile app)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
@@ -21,6 +23,7 @@ Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/
 ├── data/       → /opt/data (agent) + /home/workspace/.hermes (workspace)
 ├── workspace/  → /workspace (both)  ← drop files here for the agent; vault/ inside
 ├── traefik/    → acme.json
+├── postgres/   data/ (live cluster, postgres-owned) + dumps/ (daily pg_dumpall, backed up)
 └── obsidian/   → /data (obsidian-sync HOME: Obsidian Sync credentials)
 ```
 
@@ -250,6 +253,29 @@ The agent container itself has no Docker (only Traefik sees the daemon, read-onl
 socket proxy): Hermes can write a compose project, you or an Orca session deploy it — from a
 checkout under `ORCA_HOME/work`, after reviewing what it does (a compose file is root on the host).
 
+## PostgreSQL (your data)
+
+`hermes-postgres` (`postgres:17-alpine`, 512 MB cap, data checksums) is a plain database for
+whatever you want kept in tables — weight, training sessions, anything the agent should query
+or fill for you. `install.sh` generates `POSTGRES_PASSWORD`; user and database default to
+`hermes` (`.env`: `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PORT`, `POSTGRES_DIR`, `POSTGRES_MEM_LIMIT`).
+
+- **Agent**: the container has `psql`/`pg_dump` and the libpq variables (`PGHOST=hermes-postgres`,
+  `PGUSER`, `PGPASSWORD`, `PGDATABASE`) plus `DATABASE_URL`, so "store my weight in the database"
+  just works — `psql -c "…"` in its terminal, or any Python/Node client with `DATABASE_URL`.
+  The workspace terminal (same network namespace) resolves `hermes-postgres` too.
+- **You**: `postgresql://hermes:<POSTGRES_PASSWORD>@<tailscale-ip>:5432/hermes` from psql,
+  DBeaver, Grafana… on any tailnet device (port bound to `DESKTOP_BIND`, firewalled like the rest).
+- **Your own projects** (Orca-deployed compose): join the network `hermes-data`
+  (`networks: {data: {external: true, name: hermes-data}}`) and use the same URL as the agent.
+- **Backups**: `backup.sh` takes a `pg_dumpall --clean` into `/srv/hermes/postgres/dumps/`
+  (7 kept) before the restic upload; the live `data/` dir is deliberately not uploaded (not
+  consistent while running). Restore: `zcat dumps/pg_dumpall-<ts>.sql.gz | sudo docker exec -i
+  hermes-postgres psql -U hermes -d postgres` (the agent must not hold connections: `--clean`
+  drops and recreates the database).
+- Major upgrades (17 → 18) are manual (`pg_dumpall`, change the tag, restore); `update.sh` only
+  follows `17-alpine` minor releases.
+
 ## Obsidian vault (optional)
 
 The agents write Markdown into `/workspace/<OBSIDIAN_VAULT_DIR>` (default `vault`, host
@@ -281,7 +307,8 @@ and deduplicates; retention 7 daily / 4 weekly / 6 monthly, prune on Sundays.
 
 Each run first takes `hermes backup` inside the agent (consistent `state.db` snapshot via the
 SQLite backup API, kept as `/srv/hermes/data/backups/hermes-backup-<ts>.zip`, 2 newest), then
-uploads `data/`, `workspace/`, `obsidian/`, `traefik/acme.json` and `stack/.env` — minus
+writes a fresh `pg_dumpall` of `hermes-postgres` to `postgres/dumps/`, then uploads `data/`,
+`workspace/`, `obsidian/`, `postgres/dumps/`, `traefik/acme.json` and `stack/.env` — minus
 `node_modules`, venvs, caches, browser profiles.
 
 **Keep `RESTIC_PASSWORD`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` and `RESTIC_REPOSITORY` outside the
@@ -302,10 +329,12 @@ now and then.
    `sudo systemctl disable --now hermes-backup.timer` right away so the empty stack does not
    become `latest` before you restore (re-enable it at the end).
 3. `sudo ./backup.sh snapshots`, then `sudo ./backup.sh restore <id> /srv/restore` and the printed
-   `sudo` lines (stack down, `rsync`/`cp` of `data/`, `workspace/`, `obsidian/`, `acme.json`, `.env`).
+   `sudo` lines (stack down, `rsync`/`cp` of `data/`, `workspace/`, `obsidian/`, `postgres/dumps/`,
+   `acme.json`, `.env`).
 4. `sudo ./install.sh` again (re-chowns for this host's `hermes` uid, sets `DESKTOP_BIND`,
-   recreates). If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of
-   `ORCA_HOME` (pairings, state). Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
+   recreates), then load the newest dump into the fresh PostgreSQL (printed `zcat … | psql` line).
+   If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of `ORCA_HOME`
+   (pairings, state). Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
 
 All OAuth logins, memory, sessions and skills come back with `data/`. Hermes-only alternative
 into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backups/<zip>`.
@@ -414,9 +443,9 @@ Node, Xvfb and the Electron libraries.
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), dns (built), obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), postgres, dns (built), obsidian-sync (profile `obsidian`) |
 | `dns/` | `alpine` + `dnsmasq`: authoritative-only answers for `DNS_ZONE`/`*.DNS_ZONE` → Tailscale IP, for Tailscale split DNS |
-| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
+| `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq`, `psql` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
 | `orca.sh` / `orca/orca.service` | Orca on the host: deps + Node + CLIs, sha512-verified AppImage under `/opt/orca/<tag>`, systemd unit template (install / update / rollback / pair / remove) |
 | traefik (compose `command:`) | static config as flags: 80→443 redirect, docker provider via `docker-socket-proxy`, `cloudflare` ACME resolver |

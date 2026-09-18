@@ -153,11 +153,23 @@ services:
       API_SERVER_HOST: 127.0.0.1
       API_SERVER_PORT: "8642"
       API_SERVER_KEY: ${API_SERVER_KEY:?set by install.sh}
+      # PostgreSQL (service below): libpq variables, so `psql` in the agent's terminal and any
+      # Python/Node client just work; DATABASE_URL for frameworks that want one string.
+      PGHOST: hermes-postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-hermes}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set by install.sh}
+      PGDATABASE: ${POSTGRES_DB:-hermes}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:?set by install.sh}@hermes-postgres:5432/${POSTGRES_DB:-hermes}
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
     networks:
       - proxy
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # Hermes Desktop backend (see hermes-dashboard below, which lives in this netns).
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
@@ -261,6 +273,43 @@ services:
 
   # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Publish on the Tailscale IP
   # and point Tailscale split DNS at it: every device on the tailnet then resolves
+  # PostgreSQL for your own structured data (weight, training logs, whatever the agent should
+  # keep in tables). Reachable as hermes-postgres:5432 from the agent (and the workspace terminal,
+  # same netns) and from the tailnet on DESKTOP_BIND:POSTGRES_PORT for a desktop client. Data dir
+  # bind-mounted under POSTGRES_DIR/data; backup.sh writes a daily pg_dumpall to POSTGRES_DIR/dumps
+  # (the consistent copy restic uploads — the live data dir is not backed up).
+  postgres:
+    image: postgres:17-alpine
+    container_name: hermes-postgres
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: ${POSTGRES_MEM_LIMIT:-512m}
+    memswap_limit: ${POSTGRES_MEM_LIMIT:-512m}
+    shm_size: 256m
+    pids_limit: 256
+    security_opt: *nnp
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, SETUID, SETGID, DAC_READ_SEARCH]   # entrypoint chowns the data dir as root, then drops to postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hermes}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set by install.sh}
+      POSTGRES_DB: ${POSTGRES_DB:-hermes}
+      POSTGRES_INITDB_ARGS: --data-checksums
+      TZ: ${TZ:-UTC}
+      PGTZ: ${TZ:-UTC}
+    volumes:
+      - ${POSTGRES_DIR:-/srv/hermes/postgres}/data:/var/lib/postgresql/data
+    networks:
+      - data
+    ports:
+      - "${DESKTOP_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1 >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # WORKSPACE_HOST (and any other name under DNS_ZONE, for your own projects behind this
   # Traefik) to this VPS — no public A record needed. Forwards nothing: only the zone is answered.
   dns:
@@ -326,6 +375,10 @@ networks:
   docker-api:
     name: docker-api
     internal: true
+  # Agent ↔ PostgreSQL. Your own compose projects can join it (`networks: {data: {external: true,
+  # name: hermes-data}}`) to use the database with the same credentials.
+  data:
+    name: hermes-data
   dns:
     name: hermes-dns
     # Not `internal` (that would drop the published :53); no masquerading instead, so the

@@ -10,8 +10,9 @@
 #
 # What is backed up: $HERMES_DATA_DIR (config, auth.json, state.db, memory, skills, CLI creds under
 # home/, plus the consistent `hermes backup` zip under backups/), $HERMES_WORKSPACE_DIR (your files,
-# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env and, when Orca is
-# installed on the host, $ORCA_HOME (Orca state, pairings, its copies of the logins, work/).
+# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env, a fresh
+# pg_dumpall of hermes-postgres under $POSTGRES_DIR/dumps and, when Orca is installed on the
+# host, $ORCA_HOME (Orca state, pairings, its copies of the logins, work/).
 # Retention: 7 daily, 4 weekly, 6 monthly; prune runs on Sundays.
 #
 # Keep RESTIC_PASSWORD + the B2 credentials somewhere safe (password manager): without them the
@@ -94,13 +95,27 @@ do_run() {
     warn "hermes-agent not healthy: skipping the hermes backup zip (raw data dir is still backed up)"
   fi
 
-  # 2. Encrypted, deduplicated upload of the host paths.
+  # 2. PostgreSQL: a consistent logical dump (the live data dir is not uploaded), 7 kept locally.
+  if [ "$(docker inspect -f '{{.State.Health.Status}}' hermes-postgres 2>/dev/null)" = healthy ]; then
+    info "pg_dumpall → $POSTGRES_DIR/dumps/"
+    mkdir -p "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR/dumps"
+    if docker exec hermes-postgres pg_dumpall -U "$POSTGRES_USER" --clean --if-exists | gzip > "$POSTGRES_DIR/dumps/.pg_dumpall.tmp.gz"; then
+      mv "$POSTGRES_DIR/dumps/.pg_dumpall.tmp.gz" "$POSTGRES_DIR/dumps/pg_dumpall-$(date +%Y%m%d-%H%M%S).sql.gz"
+      ls -1t "$POSTGRES_DIR/dumps"/pg_dumpall-*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm -f
+    else
+      rm -f "$POSTGRES_DIR/dumps/.pg_dumpall.tmp.gz"; warn "pg_dumpall failed — no fresh PostgreSQL dump in this backup"
+    fi
+  else
+    warn "hermes-postgres not healthy: no fresh PostgreSQL dump in this backup (older dumps are still uploaded)"
+  fi
+
+  # 3. Encrypted, deduplicated upload of the host paths.
   info "restic backup → $RESTIC_REPOSITORY"
-  local paths=("$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env")
+  local paths=("$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env" "$POSTGRES_DIR/dumps")
   [ -d "$ORCA_HOME" ] && paths+=("$ORCA_HOME")
   restic_run backup --tag hermes-stack "${EXCLUDES[@]}" "${paths[@]}"
 
-  # 3. Retention. Prune (actual deletion, B2 API-call heavy) once a week.
+  # 4. Retention. Prune (actual deletion, B2 API-call heavy) once a week.
   prune=()
   [ "$(date +%u)" = 7 ] && prune=(--prune)
   restic_run forget --tag hermes-stack "${KEEP_ARGS[@]}" "${prune[@]}"
@@ -124,7 +139,9 @@ Restored under $target. To put it back in place with the stack stopped (as root 
   sudo rsync -a $target$OBSIDIAN_DIR/ $OBSIDIAN_DIR/
   sudo cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && sudo chmod 600 $TRAEFIK_DIR/acme.json
   sudo cp $target$STACK_DIR/.env $STACK_DIR/.env
+  sudo mkdir -p $POSTGRES_DIR/dumps && sudo rsync -a $target$POSTGRES_DIR/dumps/ $POSTGRES_DIR/dumps/
   sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
+  zcat $POSTGRES_DIR/dumps/pg_dumpall-<latest>.sql.gz | sudo docker exec -i hermes-postgres psql -U $POSTGRES_USER -d postgres   # PostgreSQL data
 $( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R orca:orca %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
   sudo rm -rf $target            # it holds every secret in clear
 Alternative (Hermes state only, into a running agent): sudo ./auth.sh shell → hermes import /opt/data/backups/hermes-backup-<ts>.zip

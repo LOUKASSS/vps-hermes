@@ -28,6 +28,7 @@ load_env() {
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
   : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
   : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=/srv/hermes/orca}"
+  : "${POSTGRES_DIR:=/srv/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
   [ -n "${RESTIC_REPOSITORY:-}" ] || RESTIC_REPOSITORY="b2:${B2_BUCKET:-}:hermes"
   export RESTIC_REPOSITORY RESTIC_IMAGE RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" B2_ACCOUNT_ID="${B2_ACCOUNT_ID:-}" B2_ACCOUNT_KEY="${B2_ACCOUNT_KEY:-}"
@@ -144,6 +145,7 @@ restic_run() {
     -v "$HERMES_WORKSPACE_DIR:$HERMES_WORKSPACE_DIR:ro" \
     -v "$TRAEFIK_DIR:$TRAEFIK_DIR:ro" \
     -v "$OBSIDIAN_DIR:$OBSIDIAN_DIR:ro" \
+    -v "$POSTGRES_DIR/dumps:$POSTGRES_DIR/dumps:ro" \
     -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" \
     "$RESTIC_IMAGE" "$@"
 }
