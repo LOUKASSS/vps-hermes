@@ -55,18 +55,26 @@ set_env() {
 # env_val KEY — current value in .env (empty if unset)
 env_val() { grep -E "^$1=" "$STACK_DIR/.env" | head -n1 | cut -d= -f2- || true; }
 
-# ask KEY "prompt" [secret] — keep existing/exported value, else prompt (dies without a TTY)
+# ask KEY "prompt" [secret] [regex] — keep existing/exported value, else prompt (dies without a
+# TTY). Values are validated against the regex (default: printable ASCII, no spaces): a stray
+# arrow-key escape or a pasted non-ASCII byte would otherwise land in .env and only surface much
+# later (Let's Encrypt: "contact email contains non-ASCII characters"). Interactive input is
+# re-asked until valid; a pre-set invalid value dies so a non-interactive run cannot proceed.
 ask() {
-  local key="$1" prompt="$2" secret="${3:-}" cur val
+  local key="$1" prompt="$2" secret="${3:-}" re="${4:-^[!-~]+$}" cur val
   cur="$(env_val "$key")"
   [ -n "${!key:-}" ] && cur="${!key}"
   case "$cur" in
     ""|workspace.example.com|you@example.com) ;;
-    *) set_env "$key" "$cur"; return ;;
+    *) LC_ALL=C grep -qE "$re" <<<"$cur" || die "$key=$cur is invalid (must match $re). Fix it in .env."
+       set_env "$key" "$cur"; return ;;
   esac
   [ -t 0 ] || die "$key is not set and stdin is not a terminal. Set it in .env and re-run."
-  if [ -n "$secret" ]; then read -r -s -p "$prompt: " val; echo; else read -r -p "$prompt: " val; fi
-  [ -n "$val" ] || die "$key is required."
+  while :; do
+    if [ -n "$secret" ]; then read -r -s -p "$prompt: " val; echo; else read -r -e -p "$prompt: " val; fi
+    LC_ALL=C grep -qE "$re" <<<"$val" && break
+    warn "$key: invalid value (must match $re) — try again."
+  done
   set_env "$key" "$val"
 }
 

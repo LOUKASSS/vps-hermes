@@ -33,9 +33,10 @@ if [ ! -f .env ]; then
 fi
 chmod 600 .env
 
-ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)"
-ask ACME_EMAIL       "Email for Let's Encrypt"
-ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" secret
+ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)" "" \
+  '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
+ask ACME_EMAIL       "Email for Let's Encrypt" "" '^[A-Za-z0-9._%+-]+@([a-z0-9-]+\.)+[a-z]{2,}$'
+ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" secret '^[A-Za-z0-9_-]{20,}$'
 # DNS zone served to the tailnet: WORKSPACE_HOST itself unless you chose a wider one.
 _zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
 [ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
