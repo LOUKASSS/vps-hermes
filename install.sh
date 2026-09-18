@@ -92,8 +92,11 @@ mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$T
 # data/ is chowned to the postgres user by the image's entrypoint; dumps/ is written by backup.sh (root).
 mkdir -p "$POSTGRES_DIR/data" "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR" "$POSTGRES_DIR/dumps"
 no_symlink "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
-touch "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
-chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
+# acme.json stays root-owned: Traefik runs as root with cap_drop ALL (no DAC_OVERRIDE), so it can
+# only open a mode-600 file it owns. Re-run of install.sh fixes older hermes-owned installs.
+touch "$TRAEFIK_DIR/acme.json"
+chown 0:0 "$TRAEFIK_DIR" "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
+chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR"
 # Credentials live here (OAuth tokens under data/home, Obsidian login under obsidian/): owner only.
 chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_DIR"
 # .env belongs to the operator (harden.sh already made them own the whole checkout, so day-to-day

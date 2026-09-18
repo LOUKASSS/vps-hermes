@@ -137,7 +137,7 @@ Restored under $target. To put it back in place with the stack stopped (as root 
   sudo rsync -a $target$HERMES_DATA_DIR/ $HERMES_DATA_DIR/
   sudo rsync -a $target$HERMES_WORKSPACE_DIR/ $HERMES_WORKSPACE_DIR/
   sudo rsync -a $target$OBSIDIAN_DIR/ $OBSIDIAN_DIR/
-  sudo cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && sudo chmod 600 $TRAEFIK_DIR/acme.json
+  sudo cp $target$TRAEFIK_DIR/acme.json $TRAEFIK_DIR/acme.json && sudo chown 0:0 $TRAEFIK_DIR/acme.json && sudo chmod 600 $TRAEFIK_DIR/acme.json
   sudo cp $target$STACK_DIR/.env $STACK_DIR/.env
   sudo mkdir -p $POSTGRES_DIR/dumps && sudo rsync -a $target$POSTGRES_DIR/dumps/ $POSTGRES_DIR/dumps/
   sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates

@@ -468,9 +468,13 @@ Node, Xvfb and the Electron libraries.
   admin console → DNS → nameserver `100.x.y.z` restricted to `DNS_ZONE`, and on the device
   Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
   must answer from anywhere on the tailnet.
-- **No certificate / browser warning** — `docker compose logs traefik`; check the Cloudflare zone and the
-  token scope (Zone:DNS:Edit + Zone:Zone:Read — "zone could not be found" = Zone:Read missing). `acme.json` must be mode 600. Let's Encrypt rejects `example.com`
-  emails.
+- **No certificate / browser warning, or Traefik 404 with its default certificate** —
+  `docker compose logs traefik`. `open /acme/acme.json: permission denied` ⇒ the ACME resolver was
+  skipped and the workspace router dropped: `acme.json` must be `root:root` mode 600 (Traefik runs
+  root with every capability dropped, so it cannot read a file owned by another user) —
+  `sudo chown 0:0 /srv/hermes/traefik/acme.json && sudo docker restart traefik`. Otherwise check the
+  Cloudflare zone and the token scope (Zone:DNS:Edit + Zone:Zone:Read — "zone could not be found" =
+  Zone:Read missing). Let's Encrypt rejects `example.com` emails.
 - **Workspace shows "Offline"** — inside the agent:
   `docker compose exec hermes-agent curl -s 127.0.0.1:8642/health` and
   `… 127.0.0.1:9119/api/status`. If you changed `API_SERVER_KEY` in `.env`, recreate the agent
