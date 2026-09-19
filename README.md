@@ -173,6 +173,34 @@ its tool subprocesses inside Docker — so the agent's own `claude -p …`, `cod
 Upstream notes: xAI OAuth can return `403` on some tiers (fallback: `XAI_API_KEY`); Codex plan
 quota semantics are not documented by Hermes.
 
+## Which agent the workspace talks to (profiles)
+
+Hermes *profiles* (`hermes profile create <name>`, each with its own `config.yaml`, `.env`,
+sessions and memories under `data/profiles/<name>/`) are what the workspace shows as agents. With
+`gateway.multiplex_profiles: true` (the default in this image) one gateway serves every profile:
+the default one at `http://127.0.0.1:8642/v1/…`, each named one at `/p/<name>/v1/…` — behind that
+profile's **own** `API_SERVER_KEY` (`profiles/<name>/.env`; the default key is never accepted there).
+
+hermes-workspace has a single gateway URL and its agent picker only writes
+`data/active_profile` — which an s6-supervised gateway deliberately ignores — so, whatever is
+selected, every chat goes to the default profile. The stack works around it with
+`WORKSPACE_PROFILE` in `.env`:
+
+```bash
+WORKSPACE_PROFILE=chief      # empty = default profile
+sudo ./install.sh            # writes the profile's key into profiles/chief/.env + WORKSPACE_API_TOKEN, recreates the workspace
+```
+
+The workspace is then pinned to that one agent (`HERMES_API_URL=…/p/chief`, its key as
+`HERMES_API_TOKEN`); the in-app picker stays cosmetic. One agent per workspace instance: for
+several agents at once use Hermes Desktop / the dashboard, which switch profiles properly.
+Dashboard-backed lists in the workspace (sessions sidebar, skills, config) still come from the
+loopback dashboard, i.e. the default profile — the workspace never passes `?profile=`.
+
+To rotate a profile key: delete `API_SERVER_KEY` from `profiles/<name>/.env`, re-run
+`install.sh` (the gateway reads the profile `.env` per request — no restart needed for the key,
+the workspace is recreated for the token).
+
 ## Hermes Desktop
 
 Hermes Desktop connects to a **dashboard backend** (`hermes serve` / `hermes dashboard`) with an
@@ -411,6 +439,7 @@ Traefik access log is off. There is no monitoring or alerting in this stack. Not
 |---|---|
 | `API_SERVER_KEY` | `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` |
 | `HERMES_PASSWORD` | `docker compose up -d --force-recreate hermes-workspace` |
+| `API_SERVER_KEY` of a profile (`profiles/<name>/.env`) | remove the line, `sudo ./install.sh` (regenerates it and `WORKSPACE_API_TOKEN` when `WORKSPACE_PROFILE` names it) |
 | `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-dashboard` |
 | `CF_DNS_API_TOKEN` | `docker compose up -d --force-recreate traefik` |
 | `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |

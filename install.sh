@@ -105,6 +105,20 @@ chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_D
 # alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
+# ── 3b. Which agent (Hermes profile) the workspace talks to ──────────────
+# hermes-workspace has ONE gateway URL; its profile picker only writes active_profile, which the
+# supervised gateway ignores by design, so every chat lands on the default profile. The gateway
+# multiplexes the named profiles at /p/<profile>/… behind a per-profile API_SERVER_KEY: point the
+# workspace there (WORKSPACE_PROFILE in .env; empty = default profile, token = API_SERVER_KEY).
+_wp="$(env_val WORKSPACE_PROFILE)"
+if [ -n "$_wp" ] && [ "$_wp" != default ]; then
+  [[ "$_wp" =~ ^[A-Za-z0-9_-]+$ ]] || die "WORKSPACE_PROFILE=$_wp: invalid profile name"
+  set_env WORKSPACE_API_TOKEN "$(profile_api_key "$_wp")"
+  info "Workspace → profile '$_wp' (http://127.0.0.1:8642/p/$_wp, key in $HERMES_DATA_DIR/profiles/$_wp/.env)"
+else
+  set_env WORKSPACE_PROFILE ""; set_env WORKSPACE_API_TOKEN ""
+fi
+
 # ── 4. Build + start ─────────────────────────────────────────────────────
 # Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
 if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then

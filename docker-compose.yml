@@ -208,9 +208,10 @@ services:
       <<: *hermes-uid
       HERMES_HOME: /home/workspace/.hermes
       HERMES_WORKSPACE_DIR: /workspace
-      HERMES_API_URL: http://127.0.0.1:8642
+      # WORKSPACE_PROFILE (install.sh): a named profile is served at /p/<profile>/… with its own key.
+      HERMES_API_URL: http://127.0.0.1:8642${WORKSPACE_PROFILE:+/p/${WORKSPACE_PROFILE}}
       HERMES_DASHBOARD_URL: http://127.0.0.1:9119
-      HERMES_API_TOKEN: ${API_SERVER_KEY:?set by install.sh}
+      HERMES_API_TOKEN: ${WORKSPACE_API_TOKEN:-${API_SERVER_KEY:?set by install.sh}}
       HERMES_PASSWORD: ${HERMES_PASSWORD:?set by install.sh}
       COOKIE_SECURE: "1"
       TRUST_PROXY: "1"
