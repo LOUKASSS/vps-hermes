@@ -20,7 +20,7 @@ esac
 do_hermes() {
   info "Hermes model provider — pick 'Anthropic' (Claude Max OAuth), 'ChatGPT or Codex Subscription', or 'xAI Grok OAuth (SuperGrok / Premium+)'."
   info "Device-code / paste-code flows: open the printed URL on your laptop, paste the code back here."
-  agent_exec hermes model
+  agent_exec hermes -p default model
 }
 
 do_claude() {
@@ -39,7 +39,7 @@ do_claude_token() {
     no_symlink "$envf"
     touch "$envf"; chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
     set_env CLAUDE_CODE_OAUTH_TOKEN "$tok" "$envf"
-    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard"
+    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent"
   fi
 }
 
@@ -71,12 +71,12 @@ do_gh() {
 do_messaging() {
   info "Messaging platforms (Telegram, Discord, Slack, WhatsApp, …). Interactive wizard; tokens land in /opt/data/.env."
   info "Bots use outbound polling/websockets — nothing to open in the firewall."
-  agent_exec hermes gateway setup
+  agent_exec hermes -p default gateway setup
   echo
   read -r -p "Recreate the gateway now to apply the new platforms? [Y/n] " a
   case "${a:-y}" in
     [yY]*) restart_agent ;;
-    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard" ;;
+    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent" ;;
   esac
 }
 
@@ -90,7 +90,7 @@ do_status() {
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
     echo; echo "── gh ──"; gh auth status 2>&1 || true
     echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
-    echo; echo "── messaging ──"; hermes gateway status 2>&1 | head -n 20 || true
+    echo; echo "── messaging ──"; hermes -p default gateway status 2>&1 | head -n 20 || true
 '
   fi
   echo; echo "── updates ──"
@@ -110,10 +110,17 @@ do_status() {
   else
     echo "not configured (run: $STACK_DIR/backup.sh setup)"
   fi
+  echo; echo "── dashboard ──"
+  # Gate + gateway state as the dashboard reports them on the raw port (same service Traefik serves).
+  _st="$(curl -fsS --max-time 5 "http://${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}/api/status" 2>/dev/null \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("auth", "on" if d.get("auth_required") else "OFF", d.get("auth_providers"), " gateway", d.get("gateway_state"), " profile", d.get("active_profile") or "default")' 2>/dev/null \
+    || echo "not answering")"
+  echo "https://${HERMES_HOST:-?}  (raw: http://${DESKTOP_BIND:-?}:${DESKTOP_PORT:-9120})  $_st"
+  echo "login: DESKTOP_USERNAME=${DESKTOP_USERNAME:-admin} from .env — unless a secret source in Hermes' config.yaml sets HERMES_DASHBOARD_BASIC_AUTH_*, which wins (README: Dashboard login)"
   echo; echo "── postgres ──"
   echo "hermes-postgres: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-postgres 2>/dev/null || echo 'not created')  db ${POSTGRES_DB} user ${POSTGRES_USER} → ${DESKTOP_BIND:-?}:${POSTGRES_PORT:-5432} (tailnet), hermes-postgres:5432 (agent)  last dump: $(ls -1t "$POSTGRES_DIR"/dumps/pg_dumpall-*.sql.gz 2>/dev/null | head -n1 | xargs -r basename)"
   echo; echo "── dns ──"
-  echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$WORKSPACE_HOST} + *.${DNS_ZONE:-$WORKSPACE_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
+  echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$HERMES_HOST} + *.${DNS_ZONE:-$HERMES_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
     echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  user orca, HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"

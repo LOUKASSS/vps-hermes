@@ -352,7 +352,7 @@ Done. Next steps:
   1. Log in as the operator and start the stack:
        ssh -i ~/.ssh/hermes_vps $OP_USER@$TS_IP
        cd /srv/hermes/stack && sudo ./install.sh && sudo ./auth.sh
-     No public DNS record needed: the stack's own DNS answers <WORKSPACE_HOST> for the tailnet.
+     No public DNS record needed: the stack's own DNS answers <HERMES_HOST> for the tailnet.
   2. Tailscale admin console → DNS → Nameservers → Add → Custom → $TS_IP, "Restrict to domain" →
      your DNS_ZONE (install.sh prints it). TLS still works via the Cloudflare DNS-01 challenge.
   3. If you run 'ufw reload' later, also run 'systemctl restart docker' (ufw flushes Docker's chains).

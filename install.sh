@@ -3,8 +3,8 @@
 #
 #   sudo ./install.sh
 #
-# Non-interactive: pre-fill WORKSPACE_HOST, ACME_EMAIL, CF_DNS_API_TOKEN in .env (or pass them
-# through sudo: `sudo WORKSPACE_HOST=… ./install.sh`) and the script will not prompt.
+# Non-interactive: pre-fill HERMES_HOST, ACME_EMAIL, CF_DNS_API_TOKEN in .env (or pass them
+# through sudo: `sudo HERMES_HOST=… ./install.sh`) and the script will not prompt.
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -32,22 +32,26 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 chmod 600 .env
+# Retired variables (hermes-workspace UI, removed 2026-09): its hostname becomes the stack's
+# (unless it is still the old example placeholder — then HERMES_HOST is asked for below).
+_old_host="$(env_val WORKSPACE_HOST)"
+[ -n "$(env_val HERMES_HOST)" ] || [ -z "$_old_host" ] || [ "$_old_host" = workspace.example.com ] || set_env HERMES_HOST "$_old_host"
+unset_env WORKSPACE_HOST WORKSPACE_PROFILE WORKSPACE_API_TOKEN WORKSPACE_MEM_LIMIT HERMES_PASSWORD
 
-ask WORKSPACE_HOST   "Public hostname for the workspace (e.g. workspace.example.com)" "" \
+ask HERMES_HOST      "Hostname of the Hermes dashboard (e.g. hermes.example.com)" "" \
   '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$'
 ask ACME_EMAIL       "Email for Let's Encrypt" "" '^[A-Za-z0-9._%+-]+@([a-z0-9-]+\.)+[a-z]{2,}$'
 ask CF_DNS_API_TOKEN "Cloudflare API token (Zone:DNS:Edit + Zone:Zone:Read)" secret '^[A-Za-z0-9_-]{20,}$'
-# DNS zone served to the tailnet: WORKSPACE_HOST itself unless you chose a wider one.
-_zone="$(env_val DNS_ZONE)"; _host="$(env_val WORKSPACE_HOST)"
+# DNS zone served to the tailnet: HERMES_HOST itself unless you chose a wider one.
+_zone="$(env_val DNS_ZONE)"; _host="$(env_val HERMES_HOST)"
 [ -n "$_zone" ] || { _zone="$_host"; set_env DNS_ZONE "$_zone"; }
-case "$_host" in "$_zone"|*".$_zone") ;; *) die "WORKSPACE_HOST=$_host is not under DNS_ZONE=$_zone (fix DNS_ZONE in .env)." ;; esac
+case "$_host" in "$_zone"|*".$_zone") ;; *) die "HERMES_HOST=$_host is not under DNS_ZONE=$_zone (fix DNS_ZONE in .env)." ;; esac
 # The zone is answered as a wildcard: an apex (example.com) would hijack mail./www. for the tailnet.
 case "$_zone" in *.*.*) ;; *) warn "DNS_ZONE=$_zone looks like a registrable apex: every *.$_zone (www, mail…) will resolve to this VPS for tailnet devices. Prefer a subdomain, e.g. hermes.$_zone." ;; esac
 
 # The gateway api_server refuses keys shorter than 16 chars.
 _key="$(env_val API_SERVER_KEY)"
 [ "${#_key}" -ge 16 ] || set_env API_SERVER_KEY "$(openssl rand -hex 32)"
-[ -n "$(env_val HERMES_PASSWORD)" ] || set_env HERMES_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_PASSWORD)" ] || set_env DESKTOP_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_SECRET)" ]   || set_env DESKTOP_SECRET "$(openssl rand -base64 32 | tr -d '/+=')"
 [ -n "$(env_val DESKTOP_USERNAME)" ] || set_env DESKTOP_USERNAME admin
@@ -66,7 +70,7 @@ if [ -n "$TS_IP" ]; then
   esac
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
-  warn "No Tailscale IP found: Traefik (80/443), Desktop backend (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+  warn "No Tailscale IP found: Traefik (80/443), dashboard (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 # Port 53 is published on DESKTOP_BIND; a resolver bound to 0.0.0.0 or to that same IP would clash.
 _bind="$(env_val DESKTOP_BIND)"
@@ -105,20 +109,6 @@ chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_D
 # alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
-# ── 3b. Which agent (Hermes profile) the workspace talks to ──────────────
-# hermes-workspace has ONE gateway URL; its profile picker only writes active_profile, which the
-# supervised gateway ignores by design, so every chat lands on the default profile. The gateway
-# multiplexes the named profiles at /p/<profile>/… behind a per-profile API_SERVER_KEY: point the
-# workspace there (WORKSPACE_PROFILE in .env; empty = default profile, token = API_SERVER_KEY).
-_wp="$(env_val WORKSPACE_PROFILE)"
-if [ -n "$_wp" ] && [ "$_wp" != default ]; then
-  [[ "$_wp" =~ ^[A-Za-z0-9_-]+$ ]] || die "WORKSPACE_PROFILE=$_wp: invalid profile name"
-  set_env WORKSPACE_API_TOKEN "$(profile_api_key "$_wp")"
-  info "Workspace → profile '$_wp' (http://127.0.0.1:8642/p/$_wp, key in $HERMES_DATA_DIR/profiles/$_wp/.env)"
-else
-  set_env WORKSPACE_PROFILE ""; set_env WORKSPACE_API_TOKEN ""
-fi
-
 # ── 4. Build + start ─────────────────────────────────────────────────────
 # Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
 if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
@@ -136,10 +126,35 @@ info "Waiting for hermes-agent to become healthy (up to 3 min)…"
 wait_healthy hermes-agent 180 || { compose logs --tail=50 hermes-agent; die "hermes-agent not healthy after 3 min."; }
 
 # The image seeds config.yaml on first boot; point the agent's terminal at the shared files dir.
-if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "/workspace" ]; then
+if [ "$(agent_run hermes -p default config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "/workspace" ]; then
   info "Setting terminal.cwd = /workspace"
-  agent_run hermes config set terminal.cwd /workspace >/dev/null
+  agent_run hermes -p default config set terminal.cwd /workspace >/dev/null
 fi
+
+# Hermes layers its external secret sources (config.yaml secrets.*, e.g. Bitwarden Secrets Manager)
+# over the container env at startup, so HERMES_DASHBOARD_BASIC_AUTH_* coming from there silently
+# replace DESKTOP_USERNAME/DESKTOP_PASSWORD. Try the .env credentials for real (from inside the
+# container, credentials on stdin) and print the ones the dashboard actually accepts.
+dash_login="user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)"
+_code="$(printf '%s\n%s\n' "$DESKTOP_USERNAME" "$DESKTOP_PASSWORD" | agent_run python3 -c '
+import json, sys, urllib.request, urllib.error
+u, p = sys.stdin.read().split("\n")[:2]
+req = urllib.request.Request("http://127.0.0.1:%s/auth/password-login" % sys.argv[1], method="POST",
+    data=json.dumps({"provider": "basic", "username": u, "password": p, "next": "/"}).encode(),
+    headers={"Content-Type": "application/json"})
+try: print(urllib.request.urlopen(req, timeout=10).status)
+except urllib.error.HTTPError as e: print(e.code)
+except Exception: print(0)
+' "${DESKTOP_PORT:-9120}" 2>/dev/null || echo 0)"
+case "$_code" in
+  200) ;;
+  401)
+    # Same loader the dashboard runs: tells us the username it ended up with (never its password).
+    _eff="$(agent_run python3 -c 'import os; from hermes_cli.env_loader import load_hermes_dotenv; load_hermes_dotenv(); print(os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", ""))' 2>/dev/null || true)"
+    warn "dashboard login: DESKTOP_USERNAME/DESKTOP_PASSWORD from .env are REJECTED — an external secret source (config.yaml secrets.*, e.g. Bitwarden) supplies HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD/SECRET and overrides them. Remove those secrets there to use the .env ones."
+    dash_login="user ${_eff:-<see your secret source>} / password: the one in that secret source   (DESKTOP_* in .env are NOT in effect)" ;;
+  *) warn "dashboard login could not be verified (HTTP $_code)"; dash_login="$dash_login — unverified" ;;
+esac
 
 # ── 6. systemd timers: weekly update, nightly backup (enabled once backup.sh setup ran) ──
 if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
@@ -161,13 +176,12 @@ fi
 compose ps
 cat <<MSG
 
-  Workspace URL : https://${WORKSPACE_HOST}   (tailnet only)
+  Dashboard     : https://${HERMES_HOST}   (tailnet only)  — ${dash_login}
   Tailnet DNS   : ${DESKTOP_BIND}:53 answers ${DNS_ZONE} and *.${DNS_ZONE} → ${DESKTOP_BIND}
                   Tailscale admin console → DNS → Nameservers → Add nameserver → Custom → ${DESKTOP_BIND},
                   "Restrict to domain" → ${DNS_ZONE}. Then every tailnet device resolves the URL.
-  Login password: ${HERMES_PASSWORD}   (HERMES_PASSWORD in .env)
-  Hermes Desktop: Settings → Gateways → Remote gateway → http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}
-                  user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)
+  Hermes Desktop: Settings → Gateways → Remote gateway → https://${HERMES_HOST} (or http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}),
+                  same user / password
   PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)

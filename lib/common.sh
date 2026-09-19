@@ -54,23 +54,8 @@ set_env() {
 }
 # env_val KEY — current value in .env (empty if unset)
 env_val() { grep -E "^$1=" "$STACK_DIR/.env" | head -n1 | cut -d= -f2- || true; }
-
-# profile_api_key <profile> — print the API_SERVER_KEY of a named Hermes profile, generating it into
-# $HERMES_DATA_DIR/profiles/<profile>/.env when missing/too short. Under gateway.multiplex_profiles
-# the gateway serves a named profile at /p/<profile>/… and only accepts THAT profile's key (it never
-# inherits the default one — see gateway/platforms/api_server.py _expected_api_key). Needs load_env.
-profile_api_key() {
-  local name="$1" dir="$HERMES_DATA_DIR/profiles/$1" f key
-  [ "$name" != default ] && [ -d "$dir" ] || die "profile '$name' not found under $HERMES_DATA_DIR/profiles/ (create it first: hermes profile create $name, in the agent)"
-  f="$dir/.env"; no_symlink "$f"
-  key="$(grep -E '^API_SERVER_KEY=' "$f" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d "\"'" || true)"
-  if [ "${#key}" -lt 16 ]; then
-    key="$(openssl rand -hex 32)"
-    set_env API_SERVER_KEY "$key" "$f"
-    chown "$HERMES_UID:$HERMES_GID" "$f" 2>/dev/null || true; chmod 600 "$f"
-  fi
-  printf '%s\n' "$key"
-}
+# unset_env KEY… — drop KEY=… lines from .env (retired variables)
+unset_env() { local k; for k in "$@"; do sed -i "/^${k}=/d" "$STACK_DIR/.env"; done; }
 
 # ask KEY "prompt" [secret] [regex] — keep existing/exported value, else prompt (dies without a
 # TTY). Values are validated against the regex (default: printable ASCII, no spaces): a stray
@@ -82,7 +67,7 @@ ask() {
   cur="$(env_val "$key")"
   [ -n "${!key:-}" ] && cur="${!key}"
   case "$cur" in
-    ""|workspace.example.com|you@example.com) ;;
+    ""|hermes.example.com|workspace.example.com|you@example.com) ;;   # .env.example placeholders (old and new)
     *) LC_ALL=C grep -qE "$re" <<<"$cur" || die "$key=$cur is invalid (must match $re). Fix it in .env."
        set_env "$key" "$cur"; return ;;
   esac
@@ -175,16 +160,12 @@ restic_run() {
     "$RESTIC_IMAGE" "$@"
 }
 
-# Recreate hermes-agent (new /opt/data/.env, new image…) together with the containers that share
-# its namespaces: a plain `restart` (or recreating hermes-agent alone) leaves hermes-workspace in
-# the orphaned netns and kills hermes-dashboard (shared PID ns). Compose orders them itself
-# (depends_on: service_healthy).
-AGENT_GROUP=(hermes-agent hermes-workspace hermes-dashboard)
-# Holds UPDATE_LOCK so heal.sh (every minute) does not "repair" the group mid-recreate. The lock
-# stays with the calling script until it exits (fd 8) — fine, these are short-lived commands.
+# Recreate hermes-agent (new /opt/data/.env, new image…). Holds UPDATE_LOCK so heal.sh (every
+# minute) does not "repair" it mid-recreate. The lock stays with the calling script until it
+# exits (fd 8) — fine, these are short-lived commands.
 restart_agent() {
   [ "${UPDATE_LOCKED:-}" = 1 ] || lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
-  compose up -d --force-recreate "${AGENT_GROUP[@]}"
+  compose up -d --force-recreate hermes-agent
   wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
 }
 

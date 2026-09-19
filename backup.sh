@@ -89,7 +89,7 @@ do_run() {
   #    $HERMES_DATA_DIR/backups so `hermes import <zip>` works on any Hermes install.
   if [ "$(docker inspect -f '{{.State.Health.Status}}' hermes-agent 2>/dev/null)" = healthy ]; then
     info "hermes backup → /opt/data/backups/"
-    agent_run sh -c 'mkdir -p /opt/data/backups && hermes backup -o "/opt/data/backups/hermes-backup-$(date +%Y%m%d-%H%M%S).zip" -k 2' \
+    agent_run sh -c 'mkdir -p /opt/data/backups && hermes -p default backup -o "/opt/data/backups/hermes-backup-$(date +%Y%m%d-%H%M%S).zip" -k 2' \
       || warn "hermes backup failed — continuing with the raw data dir"
   else
     warn "hermes-agent not healthy: skipping the hermes backup zip (raw data dir is still backed up)"

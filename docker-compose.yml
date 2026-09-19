@@ -1,4 +1,4 @@
-# Hermes Agent + Hermes Workspace + Traefik — single-VPS stack.
+# Hermes Agent + Traefik — single-VPS stack.
 #
 #   install.sh  → first boot on a fresh VPS
 #   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh), messaging platforms
@@ -8,19 +8,17 @@
 #   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
 #
 # Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
-#   traefik ──proxy──▶ hermes-agent netns ─ :3000 hermes-workspace (https://WORKSPACE_HOST)
-#      │                                   ├ :8642 gateway API (127.0.0.1 only)
-#      └─▶ docker-socket-proxy (read-only  ├ :9119 dashboard (127.0.0.1 only, no auth gate)
-#          view of the Docker API)         └ :9120 hermes-dashboard for Desktop (basic auth)
+#   traefik ──proxy──▶ hermes-agent ─ :9120 dashboard (basic auth) = https://HERMES_HOST, also
+#      │                             │       published raw on DESKTOP_BIND:9120 for Hermes Desktop
+#      └─▶ docker-socket-proxy       └ :8642 gateway API (127.0.0.1 only)
+#          (read-only view of the Docker API)
 #   dns :53 on the Tailscale IP — answers DNS_ZONE and *.DNS_ZONE with that IP, for Tailscale
 #   split DNS (admin console → DNS → nameserver restricted to DNS_ZONE). obsidian-sync (profile obsidian)
 #   Orca is NOT a container: orca.sh installs it on the host as a systemd service (orca.service).
 #
-# hermes-workspace runs with network_mode: service:hermes-agent so it can reach the
-# loopback-only dashboard (its session token is scraped from the dashboard root HTML,
-# which is only served unauthenticated on a loopback bind). Because port 3000 therefore
-# lives in the hermes-agent container's network namespace, the Traefik labels are on
-# hermes-agent, not on hermes-workspace.
+# The dashboard is the image's own s6-supervised service (HERMES_DASHBOARD=1) inside hermes-agent:
+# same PID namespace as the gateway (liveness detection) and no second container to keep in sync.
+# A non-loopback bind engages its auth gate, satisfied by the bundled username/password provider.
 
 x-hermes-uid: &hermes-uid
   HERMES_UID: ${HERMES_UID:-1000}
@@ -136,7 +134,11 @@ services:
     container_name: hermes-agent
     restart: unless-stopped
     logging: *logging
-    command: ["gateway", "run"]
+    # `-p default` is required: a bare `hermes gateway run` follows the sticky `active_profile` file
+    # (set when you switch profiles in the dashboard), which under s6 starts THAT profile's gateway
+    # slot next to the default one — the newcomer grabs 127.0.0.1:8642 first and the default
+    # multiplexer's api_server is parked ("Port 8642 already in use").
+    command: ["hermes", "-p", "default", "gateway", "run"]
     shm_size: 1g
     mem_limit: ${AGENT_MEM_LIMIT:-10g}
     memswap_limit: ${AGENT_MEM_LIMIT:-10g}   # = mem_limit: no swap on top
@@ -145,11 +147,16 @@ services:
     security_opt: *nnp
     environment:
       <<: *hermes-uid
+      # Dashboard (web UI + Hermes Desktop backend), reached through Traefik and on DESKTOP_BIND.
       HERMES_DASHBOARD: "1"
-      HERMES_DASHBOARD_HOST: 127.0.0.1
-      HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "${DESKTOP_PORT:-9120}"
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${DESKTOP_USERNAME:-admin}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD:?set by install.sh}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET:?set by install.sh}
+      # Gateway HTTP API (OpenAI-compatible; named profiles at /p/<name>/… with their own key).
+      # Loopback only: nothing outside the container uses it (curl from the agent's terminal does).
       API_SERVER_ENABLED: "true"
-      # Loopback is enough: hermes-workspace shares this network namespace.
       API_SERVER_HOST: 127.0.0.1
       API_SERVER_PORT: "8642"
       API_SERVER_KEY: ${API_SERVER_KEY:?set by install.sh}
@@ -173,114 +180,32 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      # Hermes Desktop backend (see hermes-dashboard below, which lives in this netns).
+      # Raw dashboard port for Hermes Desktop (Remote gateway → http://DESKTOP_BIND:9120).
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
       - "${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}:${DESKTOP_PORT:-9120}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:9119/api/status >/dev/null || exit 1"]
+      # /p/default/health answers 200 only on the default (multiplexing) gateway — a per-profile
+      # gateway that stole 8642 returns 404 there, while plain /health is 200 on both.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/p/default/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 60s
+    # https://HERMES_HOST → the dashboard (its own basic auth; Traefik only terminates TLS).
     labels:
       traefik.enable: "true"
       traefik.docker.network: proxy
-      traefik.http.routers.workspace.rule: Host(`${WORKSPACE_HOST:?set by install.sh}`)
-      traefik.http.routers.workspace.entrypoints: websecure
-      traefik.http.routers.workspace.tls.certresolver: cloudflare
-      traefik.http.routers.workspace.service: workspace
-      traefik.http.services.workspace.loadbalancer.server.port: "3000"
+      traefik.http.routers.hermes.rule: Host(`${HERMES_HOST:?set by install.sh}`)
+      traefik.http.routers.hermes.entrypoints: websecure
+      traefik.http.routers.hermes.tls.certresolver: cloudflare
+      traefik.http.routers.hermes.service: hermes
+      traefik.http.services.hermes.loadbalancer.server.port: "${DESKTOP_PORT:-9120}"
 
-  hermes-workspace:
-    image: ghcr.io/outsourc-e/hermes-workspace:latest
-    container_name: hermes-workspace
-    restart: unless-stopped
-    logging: *logging
-    mem_limit: ${WORKSPACE_MEM_LIMIT:-3g}
-    memswap_limit: ${WORKSPACE_MEM_LIMIT:-3g}
-    pids_limit: 1024
-    security_opt: *nnp
-    network_mode: "service:hermes-agent"
-    depends_on:
-      hermes-agent:
-        condition: service_healthy
-    environment:
-      <<: *hermes-uid
-      HERMES_HOME: /home/workspace/.hermes
-      HERMES_WORKSPACE_DIR: /workspace
-      # WORKSPACE_PROFILE (install.sh): a named profile is served at /p/<profile>/… with its own key.
-      HERMES_API_URL: http://127.0.0.1:8642${WORKSPACE_PROFILE:+/p/${WORKSPACE_PROFILE}}
-      HERMES_DASHBOARD_URL: http://127.0.0.1:9119
-      HERMES_API_TOKEN: ${WORKSPACE_API_TOKEN:-${API_SERVER_KEY:?set by install.sh}}
-      HERMES_PASSWORD: ${HERMES_PASSWORD:?set by install.sh}
-      COOKIE_SECURE: "1"
-      TRUST_PROXY: "1"
-      HOST: 0.0.0.0
-      PORT: "3000"
-    volumes:
-      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/home/workspace/.hermes
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
-    # Also probes the gateway on loopback: when hermes-agent restarts, containers joined to its
-    # netns are left in the old, orphaned namespace (loopback still works there, so probing only
-    # our own port would stay green). Seeing no gateway ⇒ unhealthy ⇒ heal.sh restarts us ⇒ we
-    # re-join the live namespace.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS -o /dev/null http://127.0.0.1:3000/ || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-
-  # Second dashboard instance for Hermes Desktop (Settings → Gateways → Remote gateway →
-  # http://<tailscale-ip>:9120, username/password). The loopback dashboard above has no auth
-  # gate (the workspace needs it that way) and rejects remote clients; a non-loopback bind
-  # engages the gate, so Desktop gets its own instance. Sharing the agent's PID namespace
-  # (needed for gateway-liveness detection) means the image entrypoint is never PID 1 and takes
-  # its non-s6 path: no supervision tree, no profile reconciler, hence no second gateway on the
-  # shared data dir (`init: true` stays as a zombie reaper). It is killed whenever hermes-agent
-  # restarts; heal.sh starts it again. API_SERVER_KEY must be passed or the bootstrap would
-  # generate one into /opt/data/.env and shadow the gateway's key.
-  hermes-dashboard:
-    image: hermes-agent-vps:latest
-    pull_policy: never   # built by the hermes-agent service
-    container_name: hermes-dashboard
-    restart: unless-stopped
-    logging: *logging
-    mem_limit: 1g
-    memswap_limit: 1g
-    pids_limit: 512
-    security_opt: *nnp
-    init: true
-    network_mode: "service:hermes-agent"
-    pid: "container:hermes-agent"
-    depends_on:
-      hermes-agent:
-        condition: service_healthy
-    command: ["dashboard", "--host", "0.0.0.0", "--port", "${DESKTOP_PORT:-9120}", "--no-open"]
-    environment:
-      <<: *hermes-uid
-      API_SERVER_KEY: ${API_SERVER_KEY:?set by install.sh}
-      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${DESKTOP_USERNAME:-admin}
-      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD:?set by install.sh}
-      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET:?set by install.sh}
-    volumes:
-      - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
-    # Same orphaned-netns guard as hermes-workspace: probe the gateway too.
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-
-  # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Publish on the Tailscale IP
-  # and point Tailscale split DNS at it: every device on the tailnet then resolves
   # PostgreSQL for your own structured data (weight, training logs, whatever the agent should
-  # keep in tables). Reachable as hermes-postgres:5432 from the agent (and the workspace terminal,
-  # same netns) and from the tailnet on DESKTOP_BIND:POSTGRES_PORT for a desktop client. Data dir
-  # bind-mounted under POSTGRES_DIR/data; backup.sh writes a daily pg_dumpall to POSTGRES_DIR/dumps
-  # (the consistent copy restic uploads — the live data dir is not backed up).
+  # keep in tables). Reachable as hermes-postgres:5432 from the agent and from the tailnet on
+  # DESKTOP_BIND:POSTGRES_PORT for a desktop client. Data dir bind-mounted under POSTGRES_DIR/data;
+  # backup.sh writes a daily pg_dumpall to POSTGRES_DIR/dumps (the consistent copy restic uploads —
+  # the live data dir is not backed up).
   postgres:
     image: postgres:17-alpine
     container_name: hermes-postgres
@@ -313,8 +238,10 @@ services:
       retries: 5
       start_period: 30s
 
-  # WORKSPACE_HOST (and any other name under DNS_ZONE, for your own projects behind this
-  # Traefik) to this VPS — no public A record needed. Forwards nothing: only the zone is answered.
+  # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Published on the Tailscale IP;
+  # point Tailscale split DNS at it and every device on the tailnet resolves HERMES_HOST (and any
+  # other name under DNS_ZONE, for your own projects behind this Traefik) to this VPS — no public
+  # A record needed. Forwards nothing: only the zone is answered.
   dns:
     build:
       context: ./dns
@@ -332,7 +259,7 @@ services:
     tmpfs: [/etc/dnsmasq.d, /run]   # entrypoint.sh renders zone.conf; pid file
     networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
-      DNS_ZONE: ${DNS_ZONE:-${WORKSPACE_HOST}}
+      DNS_ZONE: ${DNS_ZONE:-${HERMES_HOST}}
       DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
       TZ: ${TZ:-UTC}
     ports:

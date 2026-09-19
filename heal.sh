@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Keeps the stack up. Run every minute by hermes-heal.timer (see install.sh):
 #   - restarts containers Docker reports unhealthy (Docker's restart policy only reacts to the
-#     process exiting — a hung gateway or a netns-orphaned workspace/dashboard stays "running");
-#   - starts containers that exited (hermes-dashboard shares hermes-agent's PID namespace and is
-#     killed on every agent restart; Docker gives up on it when the agent is not up yet);
-#   - hermes-agent itself is always recreated with `compose up -d --force-recreate` (restart_agent),
-#     which recreates the containers sharing its namespaces too.
+#     process exiting — a hung gateway stays "running");
+#   - starts containers that exited (Docker's restart policy gives up after repeated failures);
+#   - hermes-agent itself is always recreated with `compose up -d --force-recreate` (restart_agent).
 # Does nothing when: no container of the project is running (stack stopped on purpose),
 # $STACK_DIR/.maintenance exists (single service stopped on purpose), or update.sh is running.
 set -euo pipefail
@@ -30,9 +28,9 @@ for row in "${rows[@]}"; do
 done
 [ "$running" -gt 0 ] || exit 0   # whole stack down: leave it alone
 
-# hermes-agent itself: recreate it with the containers sharing its namespaces, nothing else.
+# hermes-agent itself: recreate it, nothing else.
 case " ${unhealthy[*]} ${stopped[*]} " in *" hermes-agent "*)
-  info "heal: hermes-agent unhealthy/stopped → recreate it with hermes-workspace + hermes-dashboard"
+  info "heal: hermes-agent unhealthy/stopped → recreate it"
   restart_agent
   exit 0 ;;
 esac

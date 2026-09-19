@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Update the stack: rebuild the derived images on the newest base, pull the other images, recreate.
 # Keeps the previous images under a `:previous` tag and rolls back to them automatically when
-# hermes-agent or hermes-workspace do not come back healthy.
+# hermes-agent does not come back healthy.
 #
 #   sudo ./update.sh              # what hermes-update.timer runs (Sunday 03:30)
 #   sudo ./update.sh rollback     # back to the images that ran before the last update, and hold
@@ -64,7 +64,7 @@ do_update() {
     warn "updates on hold since $(cat "$UPDATE_HOLD") (after a rollback). Lift with: sudo $0 resume — or: sudo $0 --force"
     exit 0
   fi
-  # heal.sh holds this lock for up to ~5 min while it recreates the agent group; wait, do not skip silently.
+  # heal.sh holds this lock for up to ~3 min while it recreates hermes-agent; wait, do not skip silently.
   lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
   info "Keeping the current images as :previous"
   save_previous
@@ -81,8 +81,8 @@ do_update() {
     do_rollback
     exit 1
   fi
-  if ! wait_healthy hermes-agent 180 || ! wait_healthy hermes-workspace 120; then
-    compose logs --tail=40 hermes-agent hermes-workspace
+  if ! wait_healthy hermes-agent 180; then
+    compose logs --tail=40 hermes-agent
     warn "stack not healthy after the update → rolling back"
     do_rollback
     exit 1

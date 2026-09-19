@@ -1,7 +1,7 @@
 # Hermes Agent — VPS stack
 
-Hermes Agent + [Hermes Workspace](https://github.com/outsourc-e/hermes-workspace) behind Traefik
-(HTTPS via Cloudflare DNS-01), with `claude` / `codex` / `grok` CLIs authenticated through your
+Hermes Agent (gateway + its dashboard web UI) behind Traefik (HTTPS via Cloudflare DNS-01),
+with `claude` / `codex` / `grok` CLIs authenticated through your
 subscriptions (no API keys), `gh`, Python 3.13, a PostgreSQL database for your own structured
 data (weight, training logs…), an optional Obsidian Sync sidecar,
 host-persistent storage the agent can read/write, nightly encrypted backups to Backblaze B2,
@@ -11,25 +11,26 @@ with Docker and sudo, so your Orca sessions can deploy on this VPS.
 
 ```
 Tailnet ──53────▶ hermes-dns  (DNS_ZONE + *.DNS_ZONE → this VPS; Tailscale split DNS points here)
-Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :3000 hermes-workspace (https://WORKSPACE_HOST, password)
-                    │                        ├ :8642 gateway API   (127.0.0.1 only)
-                    └▶ docker-socket-proxy   ├ :9119 dashboard     (127.0.0.1 only, for the workspace)
-Tailnet ──9120─────────────────────────────▶ └ :9120 hermes-dashboard (basic auth, for Hermes Desktop)
+Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :9120 dashboard (https://HERMES_HOST, basic auth; web UI + Hermes Desktop)
+                    │                        │
+                    └▶ docker-socket-proxy   └ :8642 gateway API (127.0.0.1 only)
+Tailnet ──9120─────────────────────────────▶ same dashboard, raw HTTP for Hermes Desktop (DESKTOP_BIND)
 Tailnet ──5432──▶ hermes-postgres  (PostgreSQL 17: your tables; the agent reaches it as hermes-postgres:5432)
 Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/codex/grok yourself, from the Orca desktop/mobile app)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
 ├── stack/                   this repo: compose, scripts, .env
-├── data/       → /opt/data (agent) + /home/workspace/.hermes (workspace)
-├── workspace/  → /workspace (both)  ← drop files here for the agent; vault/ inside
+├── data/       → /opt/data (agent: config, sessions, credentials, profiles)
+├── workspace/  → /workspace  ← drop files here for the agent; vault/ inside
 ├── traefik/    → acme.json
 ├── postgres/   data/ (live cluster, postgres-owned) + dumps/ (daily pg_dumpall, backed up)
 └── obsidian/   → /data (obsidian-sync HOME: Obsidian Sync credentials)
 ```
 
-`hermes-workspace` shares the agent container's network namespace, so the dashboard and the
-gateway API stay loopback-only (no auth gate, no exposure) while the workspace still reaches
-them. Nothing is reachable from the Internet: Traefik (80/443), the Desktop backend, the DNS and
+The dashboard is the image's own s6-supervised service inside `hermes-agent` (same PID
+namespace as the gateway, so it sees the gateway's state); its username/password gate is on
+because it binds `0.0.0.0` in the container, and the gateway API stays loopback-only. Nothing is
+reachable from the Internet: Traefik (80/443), the dashboard port, the DNS and
 Orca all bind the Tailscale IP (`DESKTOP_BIND`), and `harden.sh`'s firewall (default deny, allow
 on `tailscale0`) is the second layer. Traefik reads container labels through
 `docker-socket-proxy` (GET-only view of the Docker API: containers, events, version — no `/info`,
@@ -42,7 +43,7 @@ they need) and have a read-only root filesystem.
 - Fresh **Ubuntu 22.04+** VPS (`harden.sh` is Ubuntu-only; the stack itself also runs on Debian 12+,
   without the isolation), root or sudo. Sized for **8 vCPU / 16 GB** with the defaults
   (`AGENT_MEM_LIMIT=10g`, `AGENT_CPUS=6`; lower them for a smaller box). No inbound port needed.
-- A Cloudflare zone containing `<WORKSPACE_HOST>` (for the Let's Encrypt DNS-01 challenge only —
+- A Cloudflare zone containing `<HERMES_HOST>` (for the Let's Encrypt DNS-01 challenge only —
   no public A record: the tailnet resolves the name through the stack's own DNS, see below).
 - Cloudflare API token with **Zone → DNS → Edit** *and* **Zone → Zone → Read** on that zone
   (Traefik's ACME client looks the zone id up before writing the challenge record).
@@ -72,9 +73,9 @@ What it does:
   key as `~/.ssh/hermes_vps` on your laptop; it is shredded from the server afterwards
   (`--keep-key` to retain, `--rotate-key` to regenerate);
 - installs **Tailscale** and joins your tailnet (interactive URL, or `TS_AUTHKEY`). Every
-  tailnet device then reaches SSH, Traefik, the Desktop backend and Orca on this node: on a
+  tailnet device then reaches SSH, Traefik, the dashboard port and Orca on this node: on a
   shared tailnet, restrict that with a Tailscale ACL (e.g. only your own tagged devices to
-  `tcp:22,443,6768,9120` of this host);
+  `tcp:22,443,5432,6768,9120` + `udp:53` of this host);
 - **ufw**: deny in by default, allow everything on `tailscale0`, only UDP 41641 on the WAN NIC;
   a `DOCKER-USER` block makes Docker-published ports unreachable from the Internet even if one
   were ever bound to 0.0.0.0 (they all bind the Tailscale IP) but reachable from the tailnet
@@ -88,8 +89,8 @@ What it does:
   rotation), `/srv/hermes` owned by `hermes` with a copy of this repo in `/srv/hermes/stack`.
 
 No public DNS record is needed: the stack runs its own DNS for the tailnet (below). The
-workspace is only reachable from your tailnet; TLS still works because DNS-01 needs no inbound
-port. (A Cloudflare A record `<WORKSPACE_HOST>` → Tailscale IP, DNS-only/grey cloud, is a
+dashboard is only reachable from your tailnet; TLS still works because DNS-01 needs no inbound
+port. (A Cloudflare A record `<HERMES_HOST>` → Tailscale IP, DNS-only/grey cloud, is a
 harmless fallback for devices that do not use the tailnet DNS.)
 
 In the Tailscale admin console, open the machine and **Disable key expiry**: with SSH closed on
@@ -108,28 +109,32 @@ sudo ./auth.sh        # OAuth logins (menu)
 ```
 
 `install.sh` is idempotent. It writes `.env` (generated secrets: `API_SERVER_KEY`,
-`HERMES_PASSWORD`, `DESKTOP_PASSWORD`, `DESKTOP_SECRET`), creates `/srv/hermes/*` owned by `hermes`
+`DESKTOP_PASSWORD`, `DESKTOP_SECRET`), creates `/srv/hermes/*` owned by `hermes`
 (fallback: the invoking `SUDO_UID`; credential dirs are mode 700), sets `DESKTOP_BIND` to the
 Tailscale IP, builds the derived image, starts the stack, installs the systemd timers and sets
 the agent's working directory to `/workspace`. Everything under `/srv/hermes` belongs to `hermes`,
 so day-to-day `docker compose …` and `git pull` from `/srv/hermes/stack` work without sudo
 (docker group; do not `sudo git pull` — root's git refuses a repo it does not own).
 
-Re-running it after changes is the normal way to apply them; it recreates `hermes-agent` (and
-the containers sharing its namespaces), so running sessions restart. It keeps a `DESKTOP_BIND`
-you set by hand and always re-derives `HERMES_UID/GID` from the `hermes` user.
+Re-running it after changes is the normal way to apply them; it recreates `hermes-agent`, so
+running sessions restart. It keeps a `DESKTOP_BIND` you set by hand and always re-derives
+`HERMES_UID/GID` from the `hermes` user. Installs from before September 2026 (the
+`hermes-workspace` UI) are migrated: `WORKSPACE_HOST` becomes `HERMES_HOST`, the retired
+`WORKSPACE_*` / `HERMES_PASSWORD` lines are dropped and the two old containers are removed
+(`--remove-orphans`).
 
 After step 2 below (the name only resolves through the tailnet DNS), open
-`https://<WORKSPACE_HOST>` and log in with `HERMES_PASSWORD` (printed at the end of install,
-stored in `.env`). The install summary prints secrets: clear the scrollback if the terminal is
-shared or recorded.
+`https://<HERMES_HOST>` and sign in with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` (printed at the
+end of install, stored in `.env`; an external secret source in Hermes' `config.yaml` can override
+them — see *Dashboard login* below). The install summary prints secrets: clear the scrollback if
+the terminal is shared or recorded.
 
 ### 2. Tailnet DNS (split DNS)
 
 `hermes-dns` (`dns/`: dnsmasq on Alpine, 32 MB) listens on the Tailscale IP, port 53, and answers
 `DNS_ZONE` and every name under it with that IP — nothing else, no forwarding. `DNS_ZONE`
-defaults to `WORKSPACE_HOST`; set a wider one in `.env` (e.g. `DNS_ZONE=hermes.example.com` with
-`WORKSPACE_HOST=workspace.hermes.example.com`) and every future `something.hermes.example.com`
+defaults to `HERMES_HOST`; set a wider one in `.env` (e.g. `DNS_ZONE=hermes.example.com` with
+`HERMES_HOST=dash.hermes.example.com`) and every future `something.hermes.example.com`
 resolves to the VPS too — handy for your own projects behind this Traefik (join the `proxy`
 network, add labels, get a certificate from the same resolver). Then, once, in the
 [Tailscale admin console](https://login.tailscale.com/admin/dns) → DNS:
@@ -139,9 +144,9 @@ network, add labels, get a certificate from the same resolver). Then, once, in t
 2. On each device, Tailscale's **Use Tailscale DNS settings** must be enabled (the default).
 
 From then on every device on the tailnet (laptop, phone, the VPS itself) resolves
-`https://<WORKSPACE_HOST>` — and only that zone — through the VPS. Check: `sudo ./auth.sh status`
-(dns line), `nslookup <WORKSPACE_HOST>` from your laptop; `docker compose logs dns`.
-`install.sh` refuses a `WORKSPACE_HOST` outside `DNS_ZONE` and warns when another resolver already
+`https://<HERMES_HOST>` — and only that zone — through the VPS. Check: `sudo ./auth.sh status`
+(dns line), `nslookup <HERMES_HOST>` from your laptop; `docker compose logs dns`.
+`install.sh` refuses a `HERMES_HOST` outside `DNS_ZONE` and warns when another resolver already
 owns port 53 on all interfaces (Ubuntu's `systemd-resolved` only binds `127.0.0.53`, no clash).
 
 ## Auth: subscriptions instead of API keys
@@ -158,7 +163,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
 | `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then offers to recreate the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
 | `obsidian` | `ob login` + `ob sync-setup --vault <id|name> --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
-| `status` | shows all of the above + update hold / backup timer / orca (host) / obsidian | |
+| `status` | shows all of the above + update hold / backup timer / dashboard gate / postgres / dns / orca (host) / obsidian | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 | `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
 
@@ -173,53 +178,50 @@ its tool subprocesses inside Docker — so the agent's own `claude -p …`, `cod
 Upstream notes: xAI OAuth can return `403` on some tiers (fallback: `XAI_API_KEY`); Codex plan
 quota semantics are not documented by Hermes.
 
-## Which agent the workspace talks to (profiles)
+## Dashboard, Hermes Desktop and profiles
 
-Hermes *profiles* (`hermes profile create <name>`, each with its own `config.yaml`, `.env`,
-sessions and memories under `data/profiles/<name>/`) are what the workspace shows as agents. With
-`gateway.multiplex_profiles: true` (the default in this image) one gateway serves every profile:
-the default one at `http://127.0.0.1:8642/v1/…`, each named one at `/p/<name>/v1/…` — behind that
-profile's **own** `API_SERVER_KEY` (`profiles/<name>/.env`; the default key is never accepted there).
+The Hermes dashboard (`hermes dashboard`: chat, sessions, skills, config, cron, kanban, profiles)
+runs as the image's own supervised service inside `hermes-agent`, bound `0.0.0.0:9120` in the
+container with the bundled username/password provider (`DESKTOP_USERNAME` / `DESKTOP_PASSWORD`,
+`DESKTOP_SECRET` signs the login cookies). Two ways in, both tailnet-only:
 
-hermes-workspace has a single gateway URL and its agent picker only writes
-`data/active_profile` — which an s6-supervised gateway deliberately ignores — so, whatever is
-selected, every chat goes to the default profile. The stack works around it with
-`WORKSPACE_PROFILE` in `.env`:
+- **Browser**: `https://<HERMES_HOST>` — Traefik terminates TLS and forwards to the dashboard,
+  which does its own authentication.
+- **Hermes Desktop**: **Settings → Gateways → Remote gateway** → `https://<HERMES_HOST>` (or the
+  raw port `http://<tailscale-ip>:9120`, `DESKTOP_PORT`, published on `DESKTOP_BIND`) → **Sign in**.
 
-```bash
-WORKSPACE_PROFILE=chief      # empty = default profile
-sudo ./install.sh            # writes the profile's key into profiles/chief/.env + WORKSPACE_API_TOKEN, recreates the workspace
-```
+Check the gate: `curl -s http://<tailscale-ip>:9120/api/status | jq '.auth_required, .auth_providers'`
+→ `true`, `["basic"]`.
 
-The workspace is then pinned to that one agent (`HERMES_API_URL=…/p/chief`, its key as
-`HERMES_API_TOKEN`); the in-app picker stays cosmetic. One agent per workspace instance: for
-several agents at once use Hermes Desktop / the dashboard, which switch profiles properly.
-Dashboard-backed lists in the workspace (sessions sidebar, skills, config) still come from the
-loopback dashboard, i.e. the default profile — the workspace never passes `?profile=`.
+**Dashboard login.** The compose file passes `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` /
+`DESKTOP_SECRET` as `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` / `_SECRET`. Hermes
+loads its environment in layers, and an external secret source configured in the agent's
+`config.yaml` (`secrets.bitwarden`: Bitwarden Secrets Manager, or another provider) is applied
+*after* the container environment and overrides it. If such a source defines those three
+variables, **its values are the effective login**, not the `DESKTOP_*` ones printed by
+`install.sh` — that is Hermes' behaviour, not the stack's. Check which one is live: a wrong
+password lands in `data/logs/dashboard-auth.log` (`data/profiles/<name>/logs/` when a profile is
+active); `sudo ./auth.sh status` (dashboard line) shows the gate and the URL. Username/password is the provider recommended by Hermes for VPN/tailnet
+access; for a public-internet backend Hermes recommends the Nous Portal OAuth provider instead —
+not needed here.
 
-To rotate a profile key: delete `API_SERVER_KEY` from `profiles/<name>/.env`, re-run
-`install.sh` (the gateway reads the profile `.env` per request — no restart needed for the key,
-the workspace is recreated for the token).
+Hermes *profiles* (`hermes profile create <name>` from `sudo ./auth.sh shell`; each has its own
+`config.yaml`, `.env`, sessions and memories under `data/profiles/<name>/`) are separate agents.
+The gateway multiplexes them (`gateway.multiplex_profiles: true`, the image default): one
+gateway process serves every profile, and the dashboard / Desktop switch between them properly.
+The gateway HTTP API (`127.0.0.1:8642` inside the container, bearer `API_SERVER_KEY`) serves the
+default profile at `/v1/…` and each named one at `/p/<name>/v1/…` behind that profile's own
+`API_SERVER_KEY` (`profiles/<name>/.env`, 16+ chars; the default key is never accepted there).
 
-## Hermes Desktop
-
-Hermes Desktop connects to a **dashboard backend** (`hermes serve` / `hermes dashboard`) with an
-auth provider. The stack runs a second dashboard instance, `hermes-dashboard`, bound
-`0.0.0.0:9120` inside the agent's network namespace with the username/password provider, and
-publishes it on the **Tailscale IP only** (`DESKTOP_BIND`, set by `install.sh`). The first
-dashboard (9119) stays loopback and auth-free because the workspace needs it that way, and a
-loopback bind rejects remote clients — hence two instances. `hermes-dashboard` runs with
-`init: true` (no s6, no profile reconciler → no second gateway) and shares the agent's PID
-namespace for gateway-liveness detection.
-
-In the app: **Settings → Gateways → Remote gateway** → `http://<tailscale-ip>:9120` (port =
-`DESKTOP_PORT`) → **Sign in** with `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` from `.env` (printed at
-the end of `install.sh`).
-`DESKTOP_SECRET` keeps you signed in across restarts. Check the gate:
-`curl -s http://<tailscale-ip>:9120/api/status | jq '.auth_required, .auth_providers'` → `true`, `["basic"]`.
-
-Username/password is the provider recommended by Hermes for VPN/tailnet access; for a
-public-internet backend Hermes recommends the Nous Portal OAuth provider instead — not needed here.
+**Per-profile gateways: never start one.** The multiplexing gateway already serves every profile
+at `/p/<name>/v1` on `127.0.0.1:8642`; a profile's own gateway (`hermes -p <name> gateway start`,
+or the Start button on a non-default profile in the dashboard) would race it for that port and
+park the multiplexer's API (`Port 8642 already in use`, gateway `DEGRADED`). Related trap: a bare
+`hermes …` inside the container follows the dashboard's sticky *active profile*
+(`data/active_profile`) — `hermes gateway run` would then run as that profile, `hermes config set`
+would edit its `config.yaml`. The container command therefore pins `-p default`, the stack scripts
+do the same, and the healthcheck probes `/p/default/health`, which only the multiplexer answers.
+Do it too in `docker exec`: `hermes -p default gateway status|restart`.
 
 ## Orca remote server (optional, on the host)
 
@@ -291,7 +293,6 @@ or fill for you. `install.sh` generates `POSTGRES_PASSWORD`; user and database d
 - **Agent**: the container has `psql`/`pg_dump` and the libpq variables (`PGHOST=hermes-postgres`,
   `PGUSER`, `PGPASSWORD`, `PGDATABASE`) plus `DATABASE_URL`, so "store my weight in the database"
   just works — `psql -c "…"` in its terminal, or any Python/Node client with `DATABASE_URL`.
-  The workspace terminal (same network namespace) resolves `hermes-postgres` too.
 - **You**: `postgresql://hermes:<POSTGRES_PASSWORD>@<tailscale-ip>:5432/hermes` from psql,
   DBeaver, Grafana… on any tailnet device (port bound to `DESKTOP_BIND`, firewalled like the rest).
 - **Your own projects** (Orca-deployed compose): join the network `hermes-data`
@@ -372,8 +373,7 @@ into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backup
 
 ## Files & Python
 
-- Put files in `/srv/hermes/workspace` on the VPS → visible as `/workspace` (agent cwd, workspace
-  file browser + terminal).
+- Put files in `/srv/hermes/workspace` on the VPS → visible as `/workspace` (the agent's cwd).
 - Python 3.13 ships in the image (venv `/opt/hermes/.venv`, no `pip`, `uv` is available); the
   agent runs scripts through its terminal tool. Extra libraries: add a
   `RUN uv pip install --python /opt/hermes/.venv/bin/python <pkg>` line to `hermes/Dockerfile` and
@@ -386,7 +386,6 @@ into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backup
 ```bash
 docker compose ps
 docker compose logs -f hermes-agent        # gateway + dashboard (s6-supervised)
-docker compose logs -f hermes-workspace
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
 sudo ./auth.sh status                       # logins, update hold, backup timer, orca (host), obsidian
@@ -397,31 +396,29 @@ sudo ./heal.sh                              # what hermes-heal.timer does every 
 systemctl list-timers 'hermes-*'            # backup 03:00 daily, update Sun 03:30, heal every minute
 ```
 
-**Updates.** Images track `:latest` (agent base, workspace, restic, obsidian-headless).
+**Updates.** Images track `:latest` (agent base, restic, obsidian-headless).
 `update.sh` first tags every running image `:previous`, then rebuilds/pulls and
-recreates; if `hermes-agent` or `hermes-workspace` are not healthy within a few minutes it rolls
+recreates; if `hermes-agent` is not healthy within a few minutes it rolls
 back to `:previous` on its own and writes `.update-hold`, which makes the weekly timer skip until
 `sudo ./update.sh resume` (or `--force`). `sudo ./update.sh rollback` does the same by hand — one
 step back only, the next update overwrites `:previous`. Disable auto-updates:
 `sudo systemctl disable --now hermes-update.timer`. Pin instead of `:latest`: `ORCA_VERSION`,
-`OBSIDIAN_HEADLESS_VERSION` in `.env`; the agent base and the workspace by editing
-`hermes/Dockerfile` `FROM` / the compose `image:` tag. Build cache is capped at 4 GB
+`OBSIDIAN_HEADLESS_VERSION` in `.env`; the agent base by editing `hermes/Dockerfile` `FROM`. Build cache is capped at 4 GB
 (`docker builder prune`); watch `df -h /var/lib/docker`. When Orca is installed, `update.sh`
 ends with `orca.sh update` (host CLIs + Orca release, own `previous`/`rollback`, not covered by
 the image rollback).
 
 **Healing.** `hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks
 unhealthy, starts exited ones (Docker's own restart policy only reacts to a process exiting) and
-recreates `hermes-agent` with its dependants when it is the one unhealthy. It stays idle when
+recreates `hermes-agent` when it is the one unhealthy. It stays idle when
 nothing in the project runs (`docker compose down`), while `update.sh` runs, and while
 `/srv/hermes/stack/.maintenance` exists — **touch that file before `docker compose stop <service>`**,
 otherwise the service is back within a minute.
 
-**Restarting the agent:** `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` (not `restart` —
-`hermes-workspace` and `hermes-dashboard` live in its network namespace and must be recreated
-with it; if you do use `restart`, `heal.sh` repairs them within ~2 min). Resource limits:
-`AGENT_MEM_LIMIT`, `AGENT_CPUS`, `WORKSPACE_MEM_LIMIT` (containers), `ORCA_MEM_LIMIT` (orca.service) in `.env`;
-traefik/dashboard/obsidian have fixed limits in the compose file.
+**Restarting the agent:** `docker compose up -d --force-recreate hermes-agent` (recreate, so a
+changed `.env` / `data/.env` is picked up; `docker compose restart hermes-agent` is fine for a
+plain restart). Resource limits: `AGENT_MEM_LIMIT`, `AGENT_CPUS` (container), `ORCA_MEM_LIMIT`
+(orca.service) in `.env`; traefik/obsidian have fixed limits in the compose file.
 
 **Updating these scripts:** `cd /srv/hermes/stack && git pull` (as `hermes`, no sudo) then
 `sudo ./install.sh`.
@@ -437,18 +434,17 @@ Traefik access log is off. There is no monitoring or alerting in this stack. Not
 
 | Secret | Then |
 |---|---|
-| `API_SERVER_KEY` | `docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard` |
-| `HERMES_PASSWORD` | `docker compose up -d --force-recreate hermes-workspace` |
-| `API_SERVER_KEY` of a profile (`profiles/<name>/.env`) | remove the line, `sudo ./install.sh` (regenerates it and `WORKSPACE_API_TOKEN` when `WORKSPACE_PROFILE` names it) |
-| `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-dashboard` |
+| `API_SERVER_KEY` | `docker compose up -d --force-recreate hermes-agent` |
+| `API_SERVER_KEY` of a profile (`profiles/<name>/.env`) | nothing — the gateway reads the profile `.env` per request |
+| `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-agent` (no effect while an external secret source supplies `HERMES_DASHBOARD_BASIC_AUTH_*` — rotate it there) |
 | `CF_DNS_API_TOKEN` | `docker compose up -d --force-recreate traefik` |
 | `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |
 | SSH key of `hermes` | `sudo /srv/hermes/stack/harden.sh --rotate-key` (a full harden run: apt upgrade, ufw reset + the lockout confirmation with the new key) |
 | Orca pairings | revoke in the app (Shared Server Access) |
 | CLI logins | `sudo ./auth.sh <claude\|codex\|grok\|gh>` again, then `sudo ./orca.sh creds` if Orca is installed |
 
-Changing `WORKSPACE_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
-(recreates `hermes-dns` and the agent group — the router labels live on `hermes-agent`, Traefik
+Changing `HERMES_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
+(recreates `hermes-dns` and `hermes-agent` — the router labels live on `hermes-agent`, Traefik
 picks them up live), update the restricted domain of the nameserver in the Tailscale admin console;
 the old certificate stays in `acme.json`, harmless.
 
@@ -475,7 +471,7 @@ Node, Xvfb and the Electron libraries.
 
 | Path | Purpose |
 |---|---|
-| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built), hermes-workspace, hermes-dashboard (Desktop backend), postgres, dns (built), obsidian-sync (profile `obsidian`) |
+| `docker-compose.yml` | docker-socket-proxy, traefik, hermes-agent (built; gateway + dashboard), postgres, dns (built), obsidian-sync (profile `obsidian`) |
 | `dns/` | `alpine` + `dnsmasq`: authoritative-only answers for `DNS_ZONE`/`*.DNS_ZONE` → Tailscale IP, for Tailscale split DNS |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq`, `psql` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
@@ -496,21 +492,25 @@ Node, Xvfb and the Electron libraries.
 - **`ufw reload` broke the containers** — ufw flushes Docker's iptables chains:
   `systemctl restart docker`.
 
-- **`<WORKSPACE_HOST>` does not resolve** — the device is not using the tailnet DNS: Tailscale
+- **`<HERMES_HOST>` does not resolve** — the device is not using the tailnet DNS: Tailscale
   admin console → DNS → nameserver `100.x.y.z` restricted to `DNS_ZONE`, and on the device
-  Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <WORKSPACE_HOST> <tailscale-ip>`
+  Tailscale's "Use Tailscale DNS settings" enabled. `nslookup <HERMES_HOST> <tailscale-ip>`
   must answer from anywhere on the tailnet.
 - **No certificate / browser warning, or Traefik 404 with its default certificate** —
   `docker compose logs traefik`. `open /acme/acme.json: permission denied` ⇒ the ACME resolver was
-  skipped and the workspace router dropped: `acme.json` must be `root:root` mode 600 (Traefik runs
+  skipped and the router dropped: `acme.json` must be `root:root` mode 600 (Traefik runs
   root with every capability dropped, so it cannot read a file owned by another user) —
   `sudo chown 0:0 /srv/hermes/traefik/acme.json && sudo docker restart traefik`. Otherwise check the
   Cloudflare zone and the token scope (Zone:DNS:Edit + Zone:Zone:Read — "zone could not be found" =
   Zone:Read missing). Let's Encrypt rejects `example.com` emails.
-- **Workspace shows "Offline"** — inside the agent:
+- **Dashboard rejects `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`** — an external secret source
+  (Hermes `config.yaml` → `secrets.*`) supplies `HERMES_DASHBOARD_BASIC_AUTH_*` and overrides the
+  compose values; use those credentials or drop them from the source. Attempts are logged in
+  `data/logs/dashboard-auth.log` (or `data/profiles/<name>/logs/`).
+- **Dashboard says the gateway is offline / `hermes-agent` unhealthy** — inside the agent:
   `docker compose exec hermes-agent curl -s 127.0.0.1:8642/health` and
-  `… 127.0.0.1:9119/api/status`. If you changed `API_SERVER_KEY` in `.env`, recreate the agent
-  and its dependants (`docker compose up -d --force-recreate hermes-agent hermes-workspace hermes-dashboard`).
+  `… 127.0.0.1:9120/api/status`; `docker compose logs hermes-agent`. If you changed
+  `API_SERVER_KEY` in `.env`, recreate the agent (`docker compose up -d --force-recreate hermes-agent`).
 - **`[config-migrate] WARNING … predates version 12`** on first boot — benign; the image seeds
   the upstream example config and `hermes setup` / `hermes model` stamp the version.
 - **Permission denied under `/srv/hermes`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
@@ -524,9 +524,7 @@ Node, Xvfb and the Electron libraries.
 - **Backup failed** — `journalctl -u hermes-backup -n 50`; `sudo ./backup.sh restic unlock` after
   an interrupted run; `sudo ./backup.sh check` to verify the repository. A long first upload can
   be cut by the 02:00 reboot window: run the first `backup.sh run` by hand.
-- **Workspace 404 / Traefik sees no router** — `docker compose logs docker-socket-proxy traefik`;
+- **404 on `https://<HERMES_HOST>` / Traefik sees no router** — `docker compose logs docker-socket-proxy traefik`;
   Traefik reaches the Docker API only through the proxy on the internal `docker-api` network.
-- **`hermes-dashboard` exited (137)** — expected right after an agent restart (shared PID
-  namespace); `heal.sh` starts it again within a minute.
 - **Local testing without root** — `ALLOW_NON_ROOT=1 ./install.sh` with `HERMES_*_DIR` pointing at
   directories you own.
