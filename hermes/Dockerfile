@@ -34,4 +34,9 @@ RUN npm install -g --no-audit --no-fund --fetch-retries=5 \
 ENV DISABLE_AUTOUPDATER=1 \
     CODEX_DISABLE_UPDATE_CHECK=1
 
-RUN gh --version && claude --version && codex --version && grok --version
+# The agent's terminal tool runs with a reduced PATH that lacks /opt/hermes/bin, so `hermes …`
+# from inside a session fails; /usr/local/bin is on every PATH. The shim is safe to symlink (it
+# execs the venv binary by absolute path).
+RUN ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
+
+RUN gh --version && claude --version && codex --version && grok --version && /usr/local/bin/hermes --version

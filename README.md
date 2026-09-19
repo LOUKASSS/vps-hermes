@@ -285,6 +285,8 @@ UID — is the **only** sync client on that vault and pushes/pulls it to your Ob
 remote vault with end-to-end encryption. The agent image does not contain `ob`, and the
 Obsidian credentials live in `/srv/hermes/obsidian`, outside the agent's HOME.
 
+Inside the agent the vault is `/workspace/vault` (`OBSIDIAN_VAULT_PATH` is set to it, which is
+what Hermes' bundled Obsidian skill reads).
 `sudo ./auth.sh obsidian` builds the image, runs the login, lists your remote vaults and asks
 which one to link (ID or name; an empty answer creates a new end-to-end encrypted vault), asks
 the E2E password, then starts the sidecar. Checks: `sudo ./auth.sh status`,

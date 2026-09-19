@@ -161,6 +161,8 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?set by install.sh}
       PGDATABASE: ${POSTGRES_DB:-hermes}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:?set by install.sh}@hermes-postgres:5432/${POSTGRES_DB:-hermes}
+      # Hermes' bundled Obsidian skill reads the vault path from this variable.
+      OBSIDIAN_VAULT_PATH: /workspace/${OBSIDIAN_VAULT_DIR:-vault}
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
