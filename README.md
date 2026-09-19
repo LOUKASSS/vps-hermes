@@ -157,7 +157,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
 | `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
 | `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then offers to recreate the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
-| `obsidian` | `ob login` + `ob sync-setup --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
+| `obsidian` | `ob login` + `ob sync-setup --vault <id|name> --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
 | `status` | shows all of the above + update hold / backup timer / orca (host) / obsidian | |
 | `shell` | bash inside the agent container (`HOME=/opt/data/home`, cwd `/workspace`) | |
 | `chat [args]` | `hermes chat` inside the agent container — the interactive CLI on the same config, sessions and `/workspace` as the gateway (`chat --tui`, `chat --resume <session>`) | |
@@ -285,9 +285,10 @@ UID — is the **only** sync client on that vault and pushes/pulls it to your Ob
 remote vault with end-to-end encryption. The agent image does not contain `ob`, and the
 Obsidian credentials live in `/srv/hermes/obsidian`, outside the agent's HOME.
 
-`sudo ./auth.sh obsidian` builds the image, runs the login and vault linking, then starts the
-sidecar. Checks: `sudo ./auth.sh status`, `docker compose logs -f obsidian-sync`.
-No remote vault yet: `docker compose --profile obsidian run --rm obsidian-sync sync-create-remote`.
+`sudo ./auth.sh obsidian` builds the image, runs the login, lists your remote vaults and asks
+which one to link (ID or name; an empty answer creates a new end-to-end encrypted vault), asks
+the E2E password, then starts the sidecar. Checks: `sudo ./auth.sh status`,
+`docker compose logs -f obsidian-sync`.
 
 ## Backups (Backblaze B2, restic)
 

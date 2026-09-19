@@ -140,9 +140,17 @@ do_obsidian() {
   echo
   info "Remote vaults:"; obsidian_exec sync-list-remote || true
   echo
-  info "Linking /vault to a remote vault (prompts for vault + E2E password)."
-  info "No remote vault yet? Ctrl+C and run: docker compose --profile obsidian run --rm obsidian-sync sync-create-remote"
-  obsidian_exec sync-setup --path /vault --device-name "hermes-vps"
+  # `ob sync-setup` needs the vault on the command line (--vault, ID or name from the list above);
+  # only the E2E password is prompted. An empty answer creates a new remote vault first.
+  local vault
+  read -r -e -p "Remote vault to link (ID or name; empty = create a new one): " vault
+  if [ -z "$vault" ]; then
+    read -r -e -p "New vault name: " vault
+    [ -n "$vault" ] || die "vault name is required."
+    obsidian_exec sync-create-remote --name "$vault" --encryption end-to-end
+  fi
+  info "Linking /vault to \"$vault\" (prompts for the E2E password)."
+  obsidian_exec sync-setup --vault "$vault" --path /vault --device-name "hermes-vps"
   # Enable the sidecar profile persistently and start it.
   enable_profile obsidian
   compose up -d obsidian-sync
