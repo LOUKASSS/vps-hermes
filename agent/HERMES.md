@@ -28,7 +28,7 @@ Données personnelles structurées → Postgres (`psql`, env `PG*` déjà là) e
 - Supprimer des données dans `/workspace`, `vault/` ou Postgres sans confirmation explicite.
 - Secrets dans le vault, les commits, MEMORY.md ou les handoffs.
 - Mélanger contextes de dépôts, ni coller l'historique health/markets dans MEMORY.md ou un board Kanban.
-- `claude`, `codex`, `grok` dans ce conteneur : ces binaires n'y sont **pas**. Interdit : `claude -p`, `codex exec`, et tout wrapper équivalent.
+- claude / codex / grok absents de ce conteneur ; ne pas les invoquer ici — session interactive via Orca sur l'hôte.
 
 ## Git
 
