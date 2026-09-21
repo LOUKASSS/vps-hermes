@@ -15,13 +15,6 @@ hermes-ssh/
 discord.txt
 *.token
 *.tokens
-# runtime state hermes writes into a profile's skills/ (profiles.sh export excludes it too)
-profiles/*/skills/.curator_state
-profiles/*/skills/.curator_ledger.jsonl
-profiles/*/skills/.locks/
-profiles/*/mcp/**/node_modules/
-profiles/*/mcp/**/dist/
-profiles/*/mcp/**/.built-from
 mcp/**/node_modules/
 mcp/**/dist/
 mcp/**/.built-from
