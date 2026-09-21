@@ -266,13 +266,9 @@ services:
     tmpfs: [/etc/dnsmasq.d, /run]   # empty conf-dir + pid file
     networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
-      # Harmless on 4km3; kept so a first-cutover rollback that still hits the custom
-      # hermes-dns entrypoint.sh (if entrypoint pin is lost) has DNS_ZONE/DNS_IP.
-      DNS_ZONE: ${DNS_ZONE:-${HERMES_HOST}}
-      DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
       TZ: ${TZ:-UTC}
     # Pin so a rollback retag of hermes-dns:latest as 4km3/dnsmasq still applies
-    # command flags (custom image ENTRYPOINT is /entrypoint.sh, which needs env).
+    # command flags (custom image ENTRYPOINT is /entrypoint.sh).
     entrypoint: ["/usr/sbin/dnsmasq", "--keep-in-foreground"]
     command:
       - --conf-file=/etc/dnsmasq.conf
