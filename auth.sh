@@ -13,10 +13,6 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-host_coding_cli() {
-  die "coding CLIs live on the host: sudo $STACK_DIR/orca.sh login claude|codex|grok"
-}
-
 # Retired names must not require hermes-agent (they only print the orca.sh pointer).
 # Everything but obsidian/status runs inside the agent container.
 case "${1:-}" in 4|obsidian|5|status|claude|claude-token|codex|grok) ;; *)
@@ -31,7 +27,7 @@ do_hermes() {
 }
 
 do_gh() {
-  info "GitHub CLI login (device flow; shared by every Hermes profile)."
+  info "GitHub CLI login (device flow; container gh — Orca has its own: sudo $STACK_DIR/orca.sh login gh)."
   agent_exec gh auth login --web --git-protocol https
   # git pushes over https reuse the gh token; commits need an identity (~/.gitconfig persists under /opt/data/home).
   agent_run gh auth setup-git || warn "gh auth setup-git failed — git push will prompt for credentials"
@@ -97,7 +93,8 @@ do_status() {
   echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$HERMES_HOST} + *.${DNS_ZONE:-$HERMES_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
-    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  user orca, HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"
+    _orca_user="$(systemctl show orca -p User --value 2>/dev/null || true)"
+    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  ${_orca_user:+user $_orca_user, }HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"
   else
     echo "not installed (run: sudo $STACK_DIR/orca.sh install)"
   fi
@@ -171,7 +168,7 @@ run_target() {
     5|status) do_status ;;
     6|shell) do_shell ;;
     7|chat) do_chat "$@" ;;
-    claude|claude-token|codex|grok) host_coding_cli ;;
+    claude|claude-token|codex|grok) die "coding CLIs live on the host: sudo $STACK_DIR/orca.sh login claude|codex|grok" ;;
     q|Q|quit) exit 0 ;;
   esac
 }
