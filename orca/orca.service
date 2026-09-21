@@ -1,5 +1,7 @@
 # Orca remote server on the host. Installed and filled in by orca.sh (edit .env, not this).
-# Runs as the dedicated user `orca` in its own HOME (ORCA_HOME) — never the agent's data dir.
+# Runs as User=hermes (harden.sh) with HOME=ORCA_HOME from EnvironmentFile — never the agent's
+# data dir, never /home/hermes. WorkingDirectory is HERMES_WORKSPACE_DIR (shared projects).
+# GIT_CONFIG_COUNT in /etc/orca.env overrides repo-local core.hooksPath.
 [Unit]
 Description=Orca remote server (headless; claude / codex / grok for the Orca desktop and mobile apps)
 After=network-online.target tailscaled.service

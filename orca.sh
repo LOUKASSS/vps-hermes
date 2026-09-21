@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
 # Orca remote server (https://www.onorca.dev/docs/remote-servers) installed ON THE HOST, not in a
-# container: `orca serve` runs as its own system user `orca` (systemd orca.service, docker group +
-# passwordless sudo, so sessions can `docker compose up` for real on this VPS) with its own HOME
-# (ORCA_HOME, default /srv/hermes/orca). That HOME is NOT shared with the agent container on
-# purpose: the container writes /srv/hermes/data/home and /srv/hermes/workspace as uid HERMES_UID,
-# and a dotfile planted there (~/.claude/settings.json hooks, ~/.gitconfig core.hooksPath,
-# ~/.codex/config.toml MCP commands, .git/hooks of a checkout…) would run as a sudo user the next
-# time an Orca session touched it. Only the credential FILES of the agent's claude / codex / grok /
-# gh logins are copied over (`orca.sh creds`); config files never are.
-# The stack checkout itself (this directory) IS shared: it is not mounted in the agent container,
-# so nothing in it is agent-written, and `orca.sh share` gives orca read-write on it (POSIX ACLs
-# next to the operator's ownership + safe.directory in orca's gitconfig) so Orca sessions can edit
-# the stack in place and run its scripts with sudo.
+# container: `orca serve` runs as user `hermes` (the harden.sh operator, systemd orca.service,
+# docker group + passwordless sudo via /etc/sudoers.d/90-hermes) with HOME=ORCA_HOME (default
+# /srv/hermes/orca, 0700). That HOME is NOT /home/hermes and is NOT mounted in the agent container:
+# the container writes /srv/hermes/data/home as uid hermes, and a dotfile planted there
+# (~/.claude/settings.json hooks, ~/.gitconfig core.hooksPath, ~/.codex/config.toml MCP commands)
+# would run as a sudoer the next time an Orca session touched it. Only the credential FILES of the
+# agent's claude / codex / grok / gh logins are copied over (`orca.sh creds`); config files never
+# are. Sessions cwd is HERMES_WORKSPACE_DIR (shared projects, also the agent's /workspace). Repo
+# hooks in that tree are overridden by GIT_CONFIG_COUNT (git -c rank); treat projects/ as untrusted
+# for sudo (Makefiles / deploy.sh = accepted residual risk). No dedicated `orca` user.
 #
-#   sudo ./orca.sh install            # user orca, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
+#   sudo ./orca.sh install            # hermes HOME, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
 #   sudo ./orca.sh update [--force]   # new release? download, verify, switch (previous kept), restart
 #   sudo ./orca.sh rollback           # back to the previous release
 #   sudo ./orca.sh pair [desktop|mobile]   # restart + print the pairing link / mobile QR
 #   sudo ./orca.sh creds              # re-copy the agent's login files into ORCA_HOME (after auth.sh)
-#   sudo ./orca.sh share              # re-apply orca's read-write ACLs on this stack checkout
-#   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as user orca instead (separate account)
+#   sudo ./orca.sh share              # no-op (same uid as the stack; no POSIX ACLs)
+#   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as hermes in ORCA_HOME (separate from the agent)
 #   sudo ./orca.sh status | logs | remove
 #
 # Layout: /opt/orca/<tag>/ (extracted AppImage) · /opt/orca/current, /opt/orca/previous (symlinks)
-#         /usr/local/bin/orca · /etc/orca.env (from .env) · /etc/systemd/system/orca.service
-#         ORCA_HOME/ (0700 orca: .config/orca state, logins, work/ = default cwd of sessions)
-#         STACK_DIR (this checkout): owner unchanged, ACL user:orca:rwX + default ACL, .env stays 600
+#         /usr/local/bin/orca · /etc/orca.env (HOME + GIT_CONFIG_COUNT) · /etc/systemd/system/orca.service
+#         ORCA_HOME/ (0700 hermes: .config/orca state, logins, git-hooks/ empty)
+#         sessions cwd: HERMES_WORKSPACE_DIR (not ORCA_HOME/work)
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -34,33 +32,89 @@ need_root
 load_env
 : "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}" "${ORCA_HOME:=/srv/hermes/orca}"
 
-ORCA_USER=orca
-ORCA_WORKDIR="$ORCA_HOME/work"
+ORCA_USER=hermes
+# Follows .env (lib/common.sh fallback stays /srv/hermes/workspace until migrate).
+ORCA_WORKDIR="${HERMES_WORKSPACE_DIR:-/srv/hermes/projects}"
+ORCA_HOOKS="$ORCA_HOME/git-hooks"
 ORCA_ROOT=/opt/orca
 ORCA_ENV=/etc/orca.env
 ORCA_UNIT=/etc/systemd/system/orca.service
-ORCA_SUDOERS=/etc/sudoers.d/91-orca
 AGENT_HOME="$HERMES_DATA_DIR/home"
 RELEASES=https://github.com/stablyai/orca/releases
 TMP_DIR=""; trap 'rm -rf "$TMP_DIR"' EXIT
 
 installed_version() { cat "$ORCA_ROOT/current/VERSION" 2>/dev/null || true; }
 
-# ── user ─────────────────────────────────────────────────────────────────
-# System user with a login shell (sessions are interactive shells), docker group, passwordless
-# sudo. Its HOME is 0700 and owned by orca only: nothing the agent container can write.
-ensure_user() {
-  if ! id "$ORCA_USER" >/dev/null 2>&1; then
-    info "Creating user $ORCA_USER (HOME=$ORCA_HOME)…"
-    groupadd -f docker
-    useradd --system --create-home --home-dir "$ORCA_HOME" --shell /bin/bash --user-group "$ORCA_USER"
+# GIT_CONFIG_* = git -c rank (beats repo-local core.hooksPath on git 2.43). Empty fsmonitor /
+# editor / sshCommand / gpg.program neutralize hook-adjacent settings. Must be in orca.env (the
+# unit) AND passed through env -i (as_hermes), or they vanish.
+git_config_defaults() {
+  cat <<EOF
+GIT_CONFIG_GLOBAL=$ORCA_HOME/.gitconfig
+GIT_CONFIG_COUNT=6
+GIT_CONFIG_KEY_0=core.hooksPath
+GIT_CONFIG_VALUE_0=$ORCA_HOOKS
+GIT_CONFIG_KEY_1=core.fsmonitor
+GIT_CONFIG_VALUE_1=
+GIT_CONFIG_KEY_2=core.pager
+GIT_CONFIG_VALUE_2=cat
+GIT_CONFIG_KEY_3=core.editor
+GIT_CONFIG_VALUE_3=true
+GIT_CONFIG_KEY_4=core.sshCommand
+GIT_CONFIG_VALUE_4=ssh
+GIT_CONFIG_KEY_5=gpg.program
+GIT_CONFIG_VALUE_5=gpg
+EOF
+}
+
+# Fill array named $1 with GIT_CONFIG_* from /etc/orca.env (set -a pass-through) or the defaults.
+load_git_config_env() {
+  local -n _git_cfg="$1"
+  local k line
+  _git_cfg=()
+  if [ -f "$ORCA_ENV" ]; then
+    # Subshell: sourcing would otherwise clobber HOME in this (root) process.
+    while IFS= read -r line; do
+      [ -n "$line" ] && _git_cfg+=("$line")
+    done < <(
+      # Drop inherited GIT_CONFIG_* so a stale parent env cannot leak into env -i.
+      for k in "${!GIT_CONFIG_@}"; do unset "$k"; done
+      set -a
+      # shellcheck disable=SC1090
+      . "$ORCA_ENV"
+      set +a
+      for k in "${!GIT_CONFIG_@}"; do
+        printf '%s=%s\n' "$k" "${!k}"
+      done
+    )
   fi
+  if [ "${#_git_cfg[@]}" -eq 0 ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && _git_cfg+=("$line")
+    done < <(git_config_defaults)
+  fi
+}
+
+# ── user ─────────────────────────────────────────────────────────────────
+# Existing harden.sh user (do not useradd). HOME is ORCA_HOME, 0700, not /home/hermes.
+# hermes already has docker + /etc/sudoers.d/90-hermes — no 91-orca fragment.
+ensure_user() {
+  id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist (harden.sh creates hermes)"
   usermod -aG docker "$ORCA_USER"
-  install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME" "$ORCA_WORKDIR"
-  local tmp; tmp="$(mktemp)"
-  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$ORCA_USER" > "$tmp"
-  visudo -cf "$tmp" >/dev/null || { rm -f "$tmp"; die "sudoers fragment for $ORCA_USER did not validate"; }
-  install -m 0440 -o root -g root "$tmp" "$ORCA_SUDOERS"; rm -f "$tmp"
+  install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME"
+  install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOOKS"
+  install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_WORKDIR"
+  ensure_gitconfig
+}
+
+# File-level defense in depth (env GIT_CONFIG_COUNT still wins over .git/config).
+ensure_gitconfig() {
+  as_hermes git config --global core.hooksPath "$ORCA_HOOKS"
+  local d
+  for d in "$ORCA_WORKDIR" "$STACK_DIR"; do
+    as_hermes git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$d" \
+      || as_hermes git config --global --add safe.directory "$d"
+  done
 }
 
 # Copy the agent's credential files (auth.sh logins) into ORCA_HOME — data only, never a config
@@ -81,37 +135,20 @@ sync_creds() {
   info "Copied $n login file(s) from $AGENT_HOME to $ORCA_HOME${missing[*]:+ (not logged in on the agent: ${missing[*]})}"
 }
 
-# Run a command as user orca with a clean environment (interactive: keeps the terminal).
-as_orca() {
+# Run a command as hermes with a clean environment. env -i drops GIT_CONFIG_* unless we pass them.
+as_hermes() {
+  local -a git_cfg=()
+  load_git_config_env git_cfg
   runuser -u "$ORCA_USER" -- env -i HOME="$ORCA_HOME" USER="$ORCA_USER" LOGNAME="$ORCA_USER" \
-    PATH=/usr/local/bin:/usr/bin:/bin TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" "$@"
+    PATH=/usr/local/bin:/usr/bin:/bin TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" \
+    "${git_cfg[@]}" "$@"
 }
 
-# Let Orca sessions edit this stack checkout in place. Ownership stays the operator's (harden.sh
-# chown -R, root's git): ACL entries give the owner AND orca rw on every existing file, and the
-# default entries make files either of them (or root running a script here) creates rw for both,
-# whatever the creator's umask. .env is left alone: install.sh keeps it 0600 for the owner, an
-# Orca session reads it with sudo. orca's global gitconfig trusts the directory (git refuses a
-# repository owned by someone else: "dubious ownership"). Idempotent; `orca.sh share` re-applies.
-# Yes, that includes .git/ (hooks, config) and the scripts root's timers run: no privilege is
-# gained, `orca` already has passwordless sudo — the boundary is the pairing link, not the ACL.
-stack_owner() { stat -c %U "$STACK_DIR"; }
+# POSIX ACLs for a dedicated orca user are gone (same uid as the stack). Command kept so callers
+# of `orca.sh share` do not break.
 share_stack() {
-  local owner; owner="$(stack_owner)"
-  command -v setfacl >/dev/null 2>&1 || die "setfacl missing: apt-get install acl (orca.sh install does)"
-  info "Sharing $STACK_DIR (owner $owner) with user $ORCA_USER (ACLs)…"
-  setfacl -R -m "u:$owner:rwX,u:$ORCA_USER:rwX" -m "d:u:$owner:rwX,d:u:$ORCA_USER:rwX" "$STACK_DIR"
-  [ -f "$STACK_DIR/.env" ] && setfacl -b "$STACK_DIR/.env" && chmod 600 "$STACK_DIR/.env"
-  as_orca git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$STACK_DIR" \
-    || as_orca git config --global --add safe.directory "$STACK_DIR"
-}
-unshare_stack() {
-  command -v setfacl >/dev/null 2>&1 && setfacl -R -b "$STACK_DIR"
-  id "$ORCA_USER" >/dev/null 2>&1 && as_orca git config --global --fixed-value --unset-all safe.directory "$STACK_DIR" 2>/dev/null || true
-}
-stack_shared() {
-  getfacl -p "$STACK_DIR" 2>/dev/null | grep -q "^user:$ORCA_USER:rw" \
-    && as_orca git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$STACK_DIR"
+  info "No dedicated orca user — $STACK_DIR is already $ORCA_USER:$ORCA_USER (no POSIX ACLs)."
+  ensure_gitconfig
 }
 
 # ── host dependencies ────────────────────────────────────────────────────
@@ -201,6 +238,8 @@ activate() {
 }
 
 # ── service ──────────────────────────────────────────────────────────────
+# Writes the unit + EnvironmentFile + daemon-reload only. Stop/restart of a live orca
+# (uid 999 → hermes) is migrate, not this function.
 write_service() {
   case "${DESKTOP_BIND:-}" in
     ""|0.0.0.0|"::"|127.0.0.1) warn "DESKTOP_BIND=${DESKTOP_BIND:-unset}: Orca will advertise that address to its clients. Set it to the Tailscale IP (install.sh does when Tailscale is up)." ;;
@@ -209,6 +248,8 @@ write_service() {
 # Generated by orca.sh from $STACK_DIR/.env — re-run \`orca.sh pair\` / \`orca.sh update --force\` after editing .env.
 HOME=$ORCA_HOME
 PATH=/usr/local/bin:/usr/bin:/bin
+# Override local .git/config (git 2.43: env = -c rank, beats the files).
+$(git_config_defaults)
 DESKTOP_BIND=${DESKTOP_BIND:-127.0.0.1}
 ORCA_PORT=$ORCA_PORT
 ORCA_PAIRING=${ORCA_PAIRING:-}
@@ -249,13 +290,11 @@ print_pairing() {
   Desktop app   : Settings → Remote Orca Servers → Add Server → paste the link
   Mobile app    : scan the QR above / open the link on the phone (must be on the tailnet)
   Sessions run as user $ORCA_USER (HOME=$ORCA_HOME, cwd $ORCA_WORKDIR) with docker and sudo — this being
-  the host. Treat the link like a root password. Logins: copies of the agent's (sudo $0 creds), or
-  your own (sudo $0 login claude|codex|grok|gh).
-  This stack     : open $STACK_DIR as a project — $ORCA_USER can edit it in place (ACLs) and run
-                   its scripts with sudo; .env stays 0600 (read it with sudo). Re-apply: sudo $0 share
-  Agent's code   : through git remotes, not by opening $HERMES_WORKSPACE_DIR (owned by the
-                   container's uid; git refuses it as "dubious ownership", and the point of the
-                   separate user is that Orca never executes what the agent wrote in place).
+  the host. Treat the link like a root password. Treat $ORCA_WORKDIR as untrusted for sudo (the agent
+  writes there; GIT_CONFIG_COUNT overrides repo hooks, not Makefiles / deploy.sh).
+  Logins: copies of the agent's (sudo $0 creds), or your own (sudo $0 login claude|codex|grok|gh).
+  This stack     : open $STACK_DIR as a project — same uid $ORCA_USER, no POSIX ACLs.
+  Shared projects: $ORCA_WORKDIR is also the agent's /workspace.
 MSG
 }
 
@@ -297,7 +336,7 @@ do_update() {
   fi
   [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
   install_clis
-  share_stack   # files pulled by update.sh get the default ACL; a stray chmod does not
+  share_stack
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -328,16 +367,16 @@ do_pair() {
   restart_and_pair
 }
 
-# login <cli> — interactive login as user orca (own account, independent of the agent's).
+# login <cli> — interactive login as hermes in ORCA_HOME (independent of the agent's HOME).
 do_login() {
   case "${1:-}" in claude|codex|grok|gh) ;; *) die "usage: $0 login claude|codex|grok|gh" ;; esac
   id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"
   [ -t 0 ] || die "login needs a terminal"
   case "$1" in
-    claude) as_orca claude auth login ;;
-    codex)  as_orca codex login --device-auth ;;
-    grok)   as_orca grok login --device-auth ;;
-    gh)     as_orca gh auth login --web --git-protocol https && as_orca gh auth setup-git ;;
+    claude) as_hermes claude auth login ;;
+    codex)  as_hermes codex login --device-auth ;;
+    grok)   as_hermes grok login --device-auth ;;
+    gh)     as_hermes gh auth login --web --git-protocol https && as_hermes gh auth setup-git ;;
   esac
 }
 
@@ -346,10 +385,9 @@ do_status() {
     echo "orca $(installed_version) (previous: $(cat "$ORCA_ROOT/previous/VERSION" 2>/dev/null || echo none))  orca.service: $(systemctl is-active orca 2>/dev/null)$([ -e "$ORCA_ROOT/.hold" ] && echo "  UPDATES ON HOLD (update --force)")"
     echo "listening: $(ss -ltnH "sport = :$ORCA_PORT" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')  advertised: ${DESKTOP_BIND:-?}:$ORCA_PORT  pairing: $([ -n "${ORCA_PAIRING:-}" ] && echo mobile || echo desktop)"
     echo "input rules: $(/usr/sbin/iptables -S INPUT 2>/dev/null | grep -c -- "--dport $ORCA_PORT " || echo 0)/3 (tailscale0 + lo accept, else drop)  ufw: $(ufw status 2>/dev/null | sed -n 's/^Status: //p' || echo n/a)"
-    echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR"
+    echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR · git-hooks $ORCA_HOOKS"
     local f; for f in "${CRED_FILES[@]}"; do [ -f "$ORCA_HOME/$f" ] && echo "  login: $f" || echo "  no login: $f"; done
-    if stack_shared; then echo "stack $STACK_DIR: read-write for $ORCA_USER (owner $(stack_owner), ACLs)"
-    else echo "stack $STACK_DIR: NOT shared with $ORCA_USER (sudo $0 share)"; fi
+    echo "stack $STACK_DIR: same uid $ORCA_USER (no ACL share)"
   else
     echo "not installed (sudo $0 install)"
   fi
@@ -357,11 +395,10 @@ do_status() {
 
 do_remove() {
   systemctl disable --now orca 2>/dev/null || true
-  rm -f "$ORCA_UNIT" "$ORCA_ENV" "$ORCA_SUDOERS" /usr/local/bin/orca
+  rm -f "$ORCA_UNIT" "$ORCA_ENV" /usr/local/bin/orca
   systemctl daemon-reload
   rm -rf "$ORCA_ROOT"
-  unshare_stack
-  info "Orca removed ($STACK_DIR is the owner's alone again; files $ORCA_USER created there keep that owner: chown -R $(stack_owner) $STACK_DIR). Kept: Node + claude/codex/grok/gh on the host, user $ORCA_USER and $ORCA_HOME (state, logins, work/): sudo userdel -r $ORCA_USER"
+  info "Orca removed (unit, $ORCA_ENV, $ORCA_ROOT). Kept: Node + claude/codex/grok/gh, user $ORCA_USER (harden.sh — not deleted), $ORCA_HOME (state, logins)."
 }
 
 case "${1:-}" in

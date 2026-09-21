@@ -12,7 +12,7 @@
 # home/, plus the consistent `hermes backup` zip under backups/), $HERMES_WORKSPACE_DIR (your files,
 # minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env, a fresh
 # pg_dumpall of hermes-postgres under $POSTGRES_DIR/dumps and, when Orca is installed on the
-# host, $ORCA_HOME (Orca state, pairings, its copies of the logins, work/).
+# host, $ORCA_HOME (Orca state, pairings, its copies of the logins).
 # Retention: 7 daily, 4 weekly, 6 monthly; prune runs on Sundays.
 #
 # Keep RESTIC_PASSWORD + the B2 credentials somewhere safe (password manager): without them the
@@ -89,7 +89,7 @@ do_run() {
   #    $HERMES_DATA_DIR/backups so `hermes import <zip>` works on any Hermes install.
   if [ "$(docker inspect -f '{{.State.Health.Status}}' hermes-agent 2>/dev/null)" = healthy ]; then
     info "hermes backup → /opt/data/backups/"
-    agent_run sh -c 'mkdir -p /opt/data/backups && hermes -p default backup -o "/opt/data/backups/hermes-backup-$(date +%Y%m%d-%H%M%S).zip" -k 2' \
+    agent_run sh -c 'mkdir -p /opt/data/backups && hermes backup -o "/opt/data/backups/hermes-backup-$(date +%Y%m%d-%H%M%S).zip" -k 2' \
       || warn "hermes backup failed — continuing with the raw data dir"
   else
     warn "hermes-agent not healthy: skipping the hermes backup zip (raw data dir is still backed up)"
@@ -142,8 +142,10 @@ Restored under $target. To put it back in place with the stack stopped (as root 
   sudo mkdir -p $POSTGRES_DIR/dumps && sudo rsync -a $target$POSTGRES_DIR/dumps/ $POSTGRES_DIR/dumps/
   sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
   zcat $POSTGRES_DIR/dumps/pg_dumpall-<latest>.sql.gz | sudo docker exec -i hermes-postgres psql -U $POSTGRES_USER -d postgres   # PostgreSQL data
-$( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R orca:orca %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
+$( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R hermes:hermes %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
   sudo rm -rf $target            # it holds every secret in clear
+Pre-cut-over snapshots restore the tree under $target/srv/hermes/workspace/ (restic keeps host paths; there is no workspace→projects symlink). If $target$HERMES_WORKSPACE_DIR is missing, rsync that tree onto $HERMES_WORKSPACE_DIR:
+  sudo rsync -a $target/srv/hermes/workspace/ $HERMES_WORKSPACE_DIR/
 Alternative (Hermes state only, into a running agent): sudo ./auth.sh shell → hermes import /opt/data/backups/hermes-backup-<ts>.zip
 MSG
 }
