@@ -43,6 +43,8 @@ load_env() {
   # shellcheck disable=SC1091
   . "$STACK_DIR/.env"
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
+  # Fallback stays /srv/hermes/workspace until migrate rewrites .env to /srv/hermes/projects.
+  # A partial checkout must not bind-mount an empty projects/ over live data.
   : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
   : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=/srv/hermes/orca}"
   : "${POSTGRES_DIR:=/srv/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
