@@ -3,9 +3,13 @@
 #   install.sh  → first boot on a fresh VPS
 #   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh), messaging platforms
 #   backup.sh   → restic backups to Backblaze B2 (nightly timer)
-#   update.sh   → rebuild + pull + recreate (weekly timer)
+#   update.sh   → pull public images + thin agent rebuild + recreate (weekly timer)
 #   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
 #   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
+#
+# Do not checkout this compose on the live VPS before migrate-single-agent.sh has
+# removed data/active_profile. `hermes gateway run` without -p default follows the
+# sticky named profile and steals :8642; update.sh refuses while that file exists.
 #
 # Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
 #   traefik ──proxy──▶ hermes-agent ─ :9120 dashboard (basic auth) = https://HERMES_HOST, also
@@ -134,11 +138,9 @@ services:
     container_name: hermes-agent
     restart: unless-stopped
     logging: *logging
-    # `-p default` is required: a bare `hermes gateway run` follows the sticky `active_profile` file
-    # (set when you switch profiles in the dashboard), which under s6 starts THAT profile's gateway
-    # slot next to the default one — the newcomer grabs 127.0.0.1:8642 first and the default
-    # multiplexer's api_server is parked ("Port 8642 already in use").
-    command: ["hermes", "-p", "default", "gateway", "run"]
+    # Single default agent: HERMES_HOME=/opt/data. Recreate only after migrate has removed
+    # data/active_profile and multiplex_profiles (a leftover sticky named profile still steals 8642).
+    command: ["hermes", "gateway", "run"]
     shm_size: 1g
     mem_limit: ${AGENT_MEM_LIMIT:-10g}
     memswap_limit: ${AGENT_MEM_LIMIT:-10g}   # = mem_limit: no swap on top
@@ -193,9 +195,8 @@ services:
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
       - "${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}:${DESKTOP_PORT:-9120}"
     healthcheck:
-      # /p/default/health answers 200 only on the default (multiplexing) gateway — a per-profile
-      # gateway that stole 8642 returns 404 there, while plain /health is 200 on both.
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/p/default/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
+      # /health is the default gateway; /api/status catches a dashboard-only hang.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -247,15 +248,12 @@ services:
       retries: 5
       start_period: 30s
 
-  # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Published on the Tailscale IP;
-  # point Tailscale split DNS at it and every device on the tailnet resolves HERMES_HOST (and any
-  # other name under DNS_ZONE, for your own projects behind this Traefik) to this VPS — no public
-  # A record needed. Forwards nothing: only the zone is answered.
+  # Authoritative-only DNS for the tailnet (public 4km3/dnsmasq; zone via command, conf bind-mounted).
+  # Published on the Tailscale IP; point Tailscale split DNS at it and every device on the tailnet
+  # resolves HERMES_HOST (and any other name under DNS_ZONE, for your own projects behind this Traefik)
+  # to this VPS — no public A record needed. Forwards nothing: only the zone is answered.
   dns:
-    build:
-      context: ./dns
-      pull: true
-    image: hermes-dns:latest
+    image: 4km3/dnsmasq:2.90-r3
     container_name: hermes-dns
     restart: unless-stopped
     logging: *logging
@@ -263,35 +261,39 @@ services:
     pids_limit: 32
     security_opt: *nnp
     cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]   # bind :53 as root, then drop to user=dnsmasq
+    cap_add: [NET_BIND_SERVICE, NET_ADMIN, SETUID, SETGID, CHOWN]   # 4km3 needs NET_ADMIN; then drop to user=dnsmasq
     read_only: true
-    tmpfs: [/etc/dnsmasq.d, /run]   # entrypoint.sh renders zone.conf; pid file
+    tmpfs: [/etc/dnsmasq.d, /run]   # empty conf-dir + pid file
     networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
-      DNS_ZONE: ${DNS_ZONE:-${HERMES_HOST}}
-      DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
       TZ: ${TZ:-UTC}
+    # Pin so a rollback retag of hermes-dns:latest as 4km3/dnsmasq still applies
+    # command flags (custom image ENTRYPOINT is /entrypoint.sh).
+    entrypoint: ["/usr/sbin/dnsmasq", "--keep-in-foreground"]
+    command:
+      - --conf-file=/etc/dnsmasq.conf
+      - --log-facility=-
+      - --address=/${DNS_ZONE:-${HERMES_HOST}}/${DESKTOP_BIND:-127.0.0.1}
+      - --local=/${DNS_ZONE:-${HERMES_HOST}}/
+    volumes:
+      - ./dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
     ports:
       - "${DESKTOP_BIND:-127.0.0.1}:53:53/udp"
       - "${DESKTOP_BIND:-127.0.0.1}:53:53/tcp"
     healthcheck:
-      test: ["CMD-SHELL", "nslookup \"$$DNS_ZONE\" 127.0.0.1 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "nslookup \"${DNS_ZONE:-${HERMES_HOST}}\" 127.0.0.1 >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  # Obsidian Sync headless client (npm obsidian-headless, `ob`) in its own minimal image.
+  # Obsidian Sync headless client (`ob`) on the official node image. obsidian-headless is
+  # installed at start into the persistent HOME volume (obsidian/entrypoint.sh).
   # Keeps /srv/hermes/workspace/<vault> (the agent's /workspace/<vault>) in sync with your
   # Obsidian Sync remote vault. Single sync client per vault: the agent only reads/writes files.
   # Disabled until configured: `sudo ./auth.sh obsidian` runs `ob login` + `ob sync-setup`
   # against the same HOME volume and enables the `obsidian` compose profile.
   obsidian-sync:
-    build:
-      context: ./obsidian
-      pull: true
-      args:
-        OBSIDIAN_HEADLESS_VERSION: ${OBSIDIAN_HEADLESS_VERSION:-latest}
-    image: obsidian-sync:latest
+    image: node:22-bookworm-slim
     container_name: obsidian-sync
     restart: unless-stopped
     logging: *logging
@@ -302,12 +304,18 @@ services:
     cap_drop: [ALL]   # runs as the runtime user from the start: nothing to keep
     profiles: ["obsidian"]
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    working_dir: /vault
     environment:
       HOME: /data
+      NPM_CONFIG_PREFIX: /data
       TZ: ${TZ:-UTC}
+      OBSIDIAN_HEADLESS_VERSION: ${OBSIDIAN_HEADLESS_VERSION:-0.0.14}
     volumes:
       - ${OBSIDIAN_DIR:-/srv/hermes/obsidian}:/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}/${OBSIDIAN_VAULT_DIR:-vault}:/vault
+      - ./obsidian/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    command: ["sync", "--continuous", "--path", "/vault"]
     networks:
       - obsidian
     healthcheck:
@@ -317,7 +325,7 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 300s   # first npm i -g into the volume can exceed 120s
 
 networks:
   proxy:
