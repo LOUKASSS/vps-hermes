@@ -99,6 +99,12 @@ fi
 
 load_env
 
+# This compose's gateway is `hermes gateway run` without -p default. Recreating
+# on a six-profile tree (sticky active_profile) steals :8642. Fresh VPS: neither path exists.
+if [ -e "$HERMES_DATA_DIR/active_profile" ] || [ -d "$HERMES_DATA_DIR/profiles/chief" ]; then
+  die "refusing install: six-profile data still present ($HERMES_DATA_DIR/active_profile or profiles/chief). Touch $STACK_DIR/.maintenance then sudo $STACK_DIR/migrate-single-agent.sh"
+fi
+
 # ── 3. Host storage ──────────────────────────────────────────────────────
 info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}, ${POSTGRES_DIR}"
 mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_DATA_DIR/private" "$HERMES_DATA_DIR/mcp" \

@@ -83,7 +83,15 @@ all_mcp_keys_present() {
 
 # ── 0. maintenance (already checked) + agent running ────────────────────
 step0() {
-  info "0. .maintenance present; agent must be running (secrets need the health profile)"
+  info "0. .maintenance present; agent must be running unless MCP keys already in data/.env"
+  if all_mcp_keys_present; then
+    if agent_running; then
+      note "0. ok (.maintenance, MCP keys already in data/.env, agent up)"
+    else
+      skip "0 agent running (MCP keys already in data/.env — resume without health profile)"
+    fi
+    return 0
+  fi
   if ! agent_running; then
     fail "start hermes-agent first (secrets 0b need the health profile on a running agent)"
   fi
@@ -143,9 +151,13 @@ if missing:
 
 have = set()
 if root_env.is_file():
-    for line in root_env.read_text(encoding="utf-8").splitlines():
+    data = root_env.read_text(encoding="utf-8")
+    for line in data.splitlines():
         if "=" in line and not line.lstrip().startswith("#"):
             have.add(line.split("=", 1)[0].strip())
+    if data and not data.endswith("\n"):
+        with root_env.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
 added = []
 with root_env.open("a", encoding="utf-8") as fh:
     for k in required:
@@ -716,25 +728,32 @@ PY
 }
 
 # ── 15. rg fail-closed ──────────────────────────────────────────────────
+# Operator-owned cut-over surfaces only. Do not walk the hermes-agent clone, vault,
+# sessions, logs, backups — third-party skills there still contain `claude -p`.
 step15() {
-  info "15. rg fail-closed: claude -p / codex exec / hermes -p health outside data/archive"
+  info "15. rg fail-closed: STACK_DIR (excludes) + HERMES.md + data/{SOUL,USER,config,skills}"
   if [ "$DRY" = 1 ]; then
-    note "15 dry-run: would rg those strings outside data/archive (including HERMES.md)"
+    note "15 dry-run: would rg STACK_DIR (excludes), HERMES.md, data/{SOUL.md,USER.md,config.yaml,skills}"
     return 0
   fi
-  local hits="" ws="${HERMES_WORKSPACE_DIR:-$PROJECTS_DIR}"
-  mkdir -p "$ws"
+  local hits="" ws="${HERMES_WORKSPACE_DIR:-$PROJECTS_DIR}" f
+  local -a paths=("$STACK_DIR")
+  [ -f "$ws/HERMES.md" ] && paths+=("$ws/HERMES.md")
+  for f in SOUL.md USER.md config.yaml; do
+    [ -f "$HERMES_DATA_DIR/$f" ] && paths+=("$HERMES_DATA_DIR/$f")
+  done
+  [ -d "$HERMES_DATA_DIR/skills" ] && paths+=("$HERMES_DATA_DIR/skills")
   if command -v rg >/dev/null 2>&1; then
     hits="$(rg -n -F -e 'claude -p' -e 'codex exec' -e 'hermes -p health' \
-      --glob '!archive/**' --glob '!.git/**' --glob '!profiles/**' --glob '!docs/**' \
+      --glob '!.git/**' --glob '!profiles/**' --glob '!docs/**' \
       --glob '!migrate-single-agent.sh' --glob '!node_modules/**' --glob '!.venv/**' \
-      "$HERMES_DATA_DIR" "$ws" "$STACK_DIR" 2>/dev/null || true)"
+      "${paths[@]}" 2>/dev/null || true)"
   else
     hits="$(grep -RIn -E 'claude -p|codex exec|hermes -p health' \
-      --exclude-dir=archive --exclude-dir=.git --exclude-dir=profiles --exclude-dir=docs \
+      --exclude-dir=.git --exclude-dir=profiles --exclude-dir=docs \
       --exclude-dir=node_modules --exclude-dir=.venv \
       --exclude=migrate-single-agent.sh \
-      "$HERMES_DATA_DIR" "$ws" "$STACK_DIR" 2>/dev/null || true)"
+      "${paths[@]}" 2>/dev/null || true)"
   fi
   if [ -n "$hits" ]; then
     printf '%s\n' "$hits" >&2

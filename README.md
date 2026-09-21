@@ -390,8 +390,8 @@ this branch:
 touch /srv/hermes/stack/.maintenance
 # take the update lock (the script takes it again)
 git fetch && git checkout refactor/single-agent
+sudo ./migrate-single-agent.sh --dry-run
 sudo ./migrate-single-agent.sh
-# optional preview: sudo ./migrate-single-agent.sh --dry-run
 ```
 
 The script refuses to run without `.maintenance`. Order (idempotent, fail-closed):
