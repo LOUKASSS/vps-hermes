@@ -9,11 +9,18 @@
 #
 # --force-soul is a no-op: SOUL.md is always distribution-owned and overwritten.
 # --force-config copies agent/config.yaml only when live config still looks like the
-# upstream Hermes seed (no mcp_servers: and multiplex_profiles absent/true).
+# upstream Hermes seed (no mcp_servers:, multiplex_profiles absent/true, no project_id:,
+# no orchestrator_profile: chief, empty plugins.enabled). A customized live default
+# must never match.
 #
 # Guard: if $HERMES_DATA_DIR/profiles/chief exists and CUTOVER is unset, sync and
 # sync-files die ("wait for migrate-single-agent.sh (CUTOVER=1)"). diff/status stay
 # readable. Migrate / install.sh cut-over export CUTOVER=1.
+#
+# Callers that already hold UPDATE_LOCK (migrate-single-agent.sh, install.sh) must
+# export UPDATE_LOCKED=1 so this script does not wait on its own flock:
+#   sudo UPDATE_LOCKED=1 CUTOVER=1 ./agent.sh sync
+# Bare invocations still take the lock. Do not skip it unconditionally.
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -57,12 +64,27 @@ require_cutover() {
 
 require_rsync() { command -v rsync >/dev/null 2>&1 || die "rsync is required (apt install rsync)"; }
 
-# Live config still looks like the image's first-boot seed (not this repo's, not a migrated live).
+# Live config still looks like the image's first-boot seed (not this repo's, not a customized live).
+# Live default currently has no mcp_servers and multiplex_profiles: true — those two checks
+# alone would treat it as a seed and --force-config would drop Bitwarden project_id.
 config_is_upstream_seed() {
   local f="$1"
   [ -f "$f" ] || return 0
   grep -qE '^mcp_servers:' "$f" && return 1
   grep -qE '^[[:space:]]*multiplex_profiles:[[:space:]]*false' "$f" && return 1
+  grep -qE '^[[:space:]]*project_id:' "$f" && return 1
+  grep -qE '^[[:space:]]*orchestrator_profile:[[:space:]]*chief[[:space:]]*$' "$f" && return 1
+  # Non-empty plugins.enabled (`- item` or `enabled: [foo]`), not `enabled: []`.
+  awk '
+    /^plugins:[[:space:]]*$/ { p=1; next }
+    p && /^[^[:space:]#]/ { p=0 }
+    p && /^[[:space:]]*enabled:[[:space:]]*$/ { e=1; next }
+    p && /^[[:space:]]*enabled:[[:space:]]*\[\][[:space:]]*$/ { next }
+    p && /^[[:space:]]*enabled:[[:space:]]*\[.+\]/ { found=1; exit }
+    e && /^[[:space:]]*disabled:/ { e=0 }
+    e && /^[[:space:]]+-[[:space:]]+/ { found=1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$f" && return 1
   return 0
 }
 
@@ -80,7 +102,7 @@ sync_config() {
     info "  --force-config: replacing upstream seed config.yaml"
     install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$src" "$dst"
   else
-    warn "  --force-config ignored: live config.yaml has mcp_servers or multiplex_profiles=false (not an upstream seed)"
+    warn "  --force-config ignored: live config.yaml is not an upstream seed (mcp_servers, multiplex=false, project_id, orchestrator chief, or plugins.enabled)"
   fi
 }
 
@@ -318,6 +340,6 @@ case "$cmd" in
   sync) do_sync ;;
   diff) do_diff ;;
   status) do_status ;;
-  -h|--help|help|"") sed -n '2,16p' "$0" ;;
+  -h|--help|help|"") sed -n '2,23p' "$0" ;;
   *) die "usage: $0 {sync-files|sync|diff|status} [--force-config] [--force-soul]" ;;
 esac
