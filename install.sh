@@ -24,7 +24,7 @@ else
   info "Docker already installed: $(docker --version)"
 fi
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing (apt install docker-compose-plugin)."
-for _pkg in openssl rsync; do   # rsync: profiles.sh stages profiles/ into the data dir
+for _pkg in openssl rsync; do   # rsync: agent.sh sync-files copies skills/ + mcp/ into the data dir
   command -v "$_pkg" >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends "$_pkg"; }
 done
 
@@ -74,6 +74,10 @@ else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
   warn "No Tailscale IP found: Traefik (80/443), dashboard (9120) and DNS (53) stay on $(env_val DESKTOP_BIND), Orca (6768) would advertise it. Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
+# Fresh installs default to projects/ (.env.example). Do not rewrite a live
+# HERMES_WORKSPACE_DIR=…/workspace — migrate-single-agent.sh owns that rename.
+[ -n "$(env_val HERMES_WORKSPACE_DIR)" ] || set_env HERMES_WORKSPACE_DIR /srv/hermes/projects
+case "$(env_val OBSIDIAN_HEADLESS_VERSION)" in ""|latest) set_env OBSIDIAN_HEADLESS_VERSION 0.0.14 ;; esac
 # Port 53 is published on DESKTOP_BIND; a resolver bound to 0.0.0.0 or to that same IP would clash.
 # Our own hermes-dns (docker-proxy) is not a clash — on a re-run it is already listening there.
 _bind="$(env_val DESKTOP_BIND)"
@@ -97,7 +101,8 @@ load_env
 
 # ── 3. Host storage ──────────────────────────────────────────────────────
 info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}, ${POSTGRES_DIR}"
-mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
+mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_DATA_DIR/private" "$HERMES_DATA_DIR/mcp" \
+  "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
 # data/ is chowned to the postgres user by the image's entrypoint; dumps/ is written by backup.sh (root).
 mkdir -p "$POSTGRES_DIR/data" "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR" "$POSTGRES_DIR/dumps"
 no_symlink "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
@@ -113,13 +118,22 @@ chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_D
 # alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
+# Seed config.yaml BEFORE the first compose up — otherwise the image writes the
+# upstream Hermes seed (_config_version, no MCP, multiplex on).
+if [ ! -f "$HERMES_DATA_DIR/config.yaml" ]; then
+  [ -f "$STACK_DIR/agent/config.yaml" ] || die "missing $STACK_DIR/agent/config.yaml"
+  info "Seeding $HERMES_DATA_DIR/config.yaml from agent/config.yaml"
+  no_symlink "$HERMES_DATA_DIR/config.yaml"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/config.yaml" "$HERMES_DATA_DIR/config.yaml"
+fi
+
 # ── 4. Build + start ─────────────────────────────────────────────────────
 # Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
 if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
   lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
 fi
-info "Building derived image (pulls nousresearch/hermes-agent:latest)…"
-compose build --pull
+info "Building thin agent image on the latest base…"
+compose build --pull hermes-agent
 info "Pulling remaining images…"
 compose pull --ignore-buildable
 info "Starting stack…"
@@ -129,19 +143,18 @@ compose up -d --remove-orphans
 info "Waiting for hermes-agent to become healthy (up to 3 min)…"
 wait_healthy hermes-agent 180 || { compose logs --tail=50 hermes-agent; die "hermes-agent not healthy after 3 min."; }
 
-# The image seeds config.yaml on first boot; point the agent's terminal at the shared files dir.
-if [ "$(agent_run hermes -p default config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "/workspace" ]; then
+# Point the agent's terminal at the shared files dir (seed config.yaml already has this).
+if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "/workspace" ]; then
   info "Setting terminal.cwd = /workspace"
-  agent_run hermes -p default config set terminal.cwd /workspace >/dev/null
+  agent_run hermes config set terminal.cwd /workspace >/dev/null
 fi
 
-# ── 5b. Agent profiles ───────────────────────────────────────────────────
-# profiles/<name>/ (SOUL.md, config.yaml, skills, plugins.txt, setup.sh) are installed as Hermes
-# profile distributions; profiles.sh restarts the gateway when it created new ones. Re-run after
-# a `git pull` that touched profiles/: sudo ./profiles.sh install
-if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && compgen -G "$STACK_DIR/profiles/*/distribution.yaml" >/dev/null; then
-  info "Installing agent profiles from profiles/…"
-  "$STACK_DIR/profiles.sh" install || warn "profiles.sh install failed — fix and re-run: sudo ./profiles.sh install"
+# ── 5b. Default agent (skills, SOUL, health MCP) ─────────────────────────
+# Re-run after a git pull that touched agent/ or skills/: sudo CUTOVER=1 ./agent.sh sync
+if [ "${ALLOW_NON_ROOT:-0}" != 1 ]; then
+  info "Syncing the default agent from agent/ + skills/ + mcp/…"
+  CUTOVER=1 UPDATE_LOCKED=1 "$STACK_DIR/agent.sh" sync \
+    || die "agent.sh sync failed — fix and re-run: sudo CUTOVER=1 UPDATE_LOCKED=1 $STACK_DIR/agent.sh sync"
 fi
 
 # Hermes layers its external secret sources (config.yaml secrets.*, e.g. Bitwarden Secrets Manager)
@@ -197,11 +210,11 @@ cat <<MSG
   Hermes Desktop: Settings → Gateways → Remote gateway → https://${HERMES_HOST} (or http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}),
                   same user / password
   PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
-  Profiles      : $(ls -d "$STACK_DIR"/profiles/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | xargs || echo none)   (profiles/ → hermes profile install; sudo ./profiles.sh status)
-  Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
-  Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
+  Agent         : default (sudo ./agent.sh status) — skills in ${HERMES_DATA_DIR}/skills, MCP in ${HERMES_DATA_DIR}/mcp
+  Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials, skills, private/)
+  Files dir     : ${HERMES_WORKSPACE_DIR}   (→ /workspace for the agent; shared with Orca)
   Backups       : ${backup_note}
-  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — manual: sudo ./update.sh; undo: sudo ./update.sh rollback
+  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — pull + thin agent rebuild; undo: sudo ./update.sh rollback
   Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited; touch .maintenance to pause)
 
   These secrets are also in .env (mode 600). Clear this terminal's scrollback if it is shared or logged.
