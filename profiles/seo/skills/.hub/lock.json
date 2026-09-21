@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "installed": {
+    "seo-audit": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/coreyhaines31/marketingskills/seo-audit",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:f29b4f122cf3e21d",
+      "install_path": "seo-audit",
+      "files": [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/ai-writing-detection.md",
+        "references/international-seo.md"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/seo-audit",
+        "source_revision": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+        "detail_url": "https://skills.sh/coreyhaines31/marketingskills/seo-audit",
+        "repo_url": "https://github.com/coreyhaines31/marketingskills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:f29b4f122cf3e21d8c9c91b53d970f0a915c25d4a2fd55503a68cf553b788bac",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/coreyhaines31/marketingskills/seo-audit",
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/seo-audit",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:14:07.996953+00:00",
+        "summary": "seo-audit: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:14:08.016426+00:00",
+      "updated_at": "2026-09-19T13:14:08.016426+00:00"
+    },
+    "content-strategy": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/coreyhaines31/marketingskills/content-strategy",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:86a0a12f12084798",
+      "install_path": "content-strategy",
+      "files": [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/content-distribution.md",
+        "references/headless-cms.md"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/content-strategy",
+        "source_revision": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+        "detail_url": "https://skills.sh/coreyhaines31/marketingskills/content-strategy",
+        "repo_url": "https://github.com/coreyhaines31/marketingskills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:86a0a12f120847983cc69392f2cb24dee52f0f23ea0821ca2343d5a0238ea2c3",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/coreyhaines31/marketingskills/content-strategy",
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/content-strategy",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:14:15.484672+00:00",
+        "summary": "content-strategy: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:14:15.509271+00:00",
+      "updated_at": "2026-09-19T13:14:15.509271+00:00"
+    },
+    "programmatic-seo": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/coreyhaines31/marketingskills/programmatic-seo",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:e138a042e3380cea",
+      "install_path": "programmatic-seo",
+      "files": [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/playbooks.md"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/programmatic-seo",
+        "source_revision": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+        "detail_url": "https://skills.sh/coreyhaines31/marketingskills/programmatic-seo",
+        "repo_url": "https://github.com/coreyhaines31/marketingskills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:e138a042e3380cea1884a2a365de91c99ae7059ce8417865daf7751774d99981",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/coreyhaines31/marketingskills/programmatic-seo",
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/programmatic-seo",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:14:22.398128+00:00",
+        "summary": "programmatic-seo: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:14:22.425634+00:00",
+      "updated_at": "2026-09-19T13:14:22.425634+00:00"
+    },
+    "schema": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/coreyhaines31/marketingskills/schema",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:8181490c3070aacf",
+      "install_path": "schema",
+      "files": [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/schema-examples.md"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/schema",
+        "source_revision": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+        "detail_url": "https://skills.sh/coreyhaines31/marketingskills/schema",
+        "repo_url": "https://github.com/coreyhaines31/marketingskills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:8181490c3070aacf4befbbfaeca667faddc6dcc02be5c60269dc39566a9fdbef",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/coreyhaines31/marketingskills/schema",
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/schema",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:14:29.250787+00:00",
+        "summary": "schema: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:14:29.272902+00:00",
+      "updated_at": "2026-09-19T13:14:29.272902+00:00"
+    },
+    "copywriting": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/coreyhaines31/marketingskills/copywriting",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:76d497ae54acef1a",
+      "install_path": "copywriting",
+      "files": [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/copy-frameworks.md",
+        "references/natural-transitions.md"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/copywriting",
+        "source_revision": "5b2c0007766c6a1cf1d53fd8fc73e979e0821022",
+        "detail_url": "https://skills.sh/coreyhaines31/marketingskills/copywriting",
+        "repo_url": "https://github.com/coreyhaines31/marketingskills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:76d497ae54acef1aa19e1c0132ab20da886a8141390147ddd96a0145e5d7d52b",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/coreyhaines31/marketingskills/copywriting",
+        "source_url": "https://github.com/coreyhaines31/marketingskills/tree/5b2c0007766c6a1cf1d53fd8fc73e979e0821022/skills/copywriting",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:14:36.275937+00:00",
+        "summary": "copywriting: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:14:36.300710+00:00",
+      "updated_at": "2026-09-19T13:14:36.300710+00:00"
+    }
+  }
+}

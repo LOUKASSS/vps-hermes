@@ -16,7 +16,7 @@ Tailnet ──443───▶ traefik ──▶ hermes-agent  ┬ :9120 dashboar
                     └▶ docker-socket-proxy   └ :8642 gateway API (127.0.0.1 only)
 Tailnet ──9120─────────────────────────────▶ same dashboard, raw HTTP for Hermes Desktop (DESKTOP_BIND)
 Tailnet ──5432──▶ hermes-postgres  (PostgreSQL 17: your tables; the agent reaches it as hermes-postgres:5432)
-Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/codex/grok yourself, from the Orca desktop/mobile app)
+Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/codex/grok yourself, from the Orca desktop/mobile app; edits this stack in place)
 
 /srv/hermes/                 (owned by the operator user `hermes`)
 ├── stack/                   this repo: compose, scripts, .env
@@ -30,9 +30,10 @@ Tailnet ──6768──▶ orca.service on the host (optional, orca.sh: claude/
 The dashboard is the image's own s6-supervised service inside `hermes-agent` (same PID
 namespace as the gateway, so it sees the gateway's state); its username/password gate is on
 because it binds `0.0.0.0` in the container, and the gateway API stays loopback-only. Nothing is
-reachable from the Internet: Traefik (80/443), the dashboard port, the DNS and
-Orca all bind the Tailscale IP (`DESKTOP_BIND`), and `harden.sh`'s firewall (default deny, allow
-on `tailscale0`) is the second layer. Traefik reads container labels through
+reachable from the Internet: Traefik (80/443), the dashboard port and the DNS bind the Tailscale
+IP (`DESKTOP_BIND`); Orca has no bind option (it listens on `0.0.0.0`, `DESKTOP_BIND` is only the
+address it advertises), so `orca.service` pins its port to `tailscale0` + loopback with its own
+iptables rules; `harden.sh`'s firewall (default deny, allow on `tailscale0`) is the second layer. Traefik reads container labels through
 `docker-socket-proxy` (GET-only view of the Docker API: containers, events, version — no `/info`,
 no POST) instead of the raw socket. Every container runs with `no-new-privileges` and a
 `pids_limit`; traefik, the socket proxy and the DNS drop all capabilities (plus the one or two
@@ -160,7 +161,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 | `claude-token` | `claude setup-token` → optionally stored as `CLAUDE_CODE_OAUTH_TOKEN` | `/srv/hermes/data/.env` |
 | `codex` | `codex login --device-auth` — Hermes imports `~/.codex/auth.json` automatically | `/srv/hermes/data/home/.codex/` |
 | `grok` | `grok login --device-auth` | `/srv/hermes/data/home/.grok/` |
-| `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email` | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
+| `gh` | `gh auth login --web` + `gh auth setup-git` (https pushes use the token) + git `user.name`/`user.email`; `GH_CONFIG_DIR` and `GIT_CONFIG_GLOBAL` expose this login to every profile despite their isolated HOME | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
 | `messaging` | `hermes gateway setup` — Telegram / Discord / Slack / WhatsApp… wizard, then offers to recreate the gateway. Bots only make outbound connections: nothing to open, tailnet-only stays intact | `/srv/hermes/data/.env` |
 | `obsidian` | `ob login` + `ob sync-setup --vault <id|name> --path /vault` in the `obsidian-sync` image (Obsidian Sync subscription required), then enables the `obsidian` compose profile and starts the sidecar (`ob sync --continuous`) | `/srv/hermes/obsidian/` (`OBSIDIAN_DIR`), vault `.obsidian/` |
 | `status` | shows all of the above + update hold / backup timer / dashboard gate / postgres / dns / orca (host) / obsidian | |
@@ -211,7 +212,7 @@ The gateway multiplexes them (`gateway.multiplex_profiles: true`, the image defa
 gateway process serves every profile, and the dashboard / Desktop switch between them properly.
 The gateway HTTP API (`127.0.0.1:8642` inside the container, bearer `API_SERVER_KEY`) serves the
 default profile at `/v1/…` and each named one at `/p/<name>/v1/…` behind that profile's own
-`API_SERVER_KEY` (`profiles/<name>/.env`, 16+ chars; the default key is never accepted there).
+`API_SERVER_KEY` (`data/profiles/<name>/.env`, 16+ chars; the default key is never accepted there).
 
 **Per-profile gateways: never start one.** The multiplexing gateway already serves every profile
 at `/p/<name>/v1` on `127.0.0.1:8642`; a profile's own gateway (`hermes -p <name> gateway start`,
@@ -222,6 +223,50 @@ park the multiplexer's API (`Port 8642 already in use`, gateway `DEGRADED`). Rel
 would edit its `config.yaml`. The container command therefore pins `-p default`, the stack scripts
 do the same, and the healthcheck probes `/p/default/health`, which only the multiplexer answers.
 Do it too in `docker exec`: `hermes -p default gateway status|restart`.
+
+## Agent profiles as code (`profiles/`, `profiles.sh`)
+
+The six agents this stack runs — `chief` (orchestrator, kanban routing), `engineer`, `seo`,
+`researcher`, `health`, `markets` — live in `profiles/<name>/` as Hermes *profile distributions*
+(`hermes profile install` / `hermes profile update`), so a fresh VPS gets them from `install.sh`
+with no registry or GitHub access, and a change to a persona or a skill set is a commit:
+
+```
+profiles/<name>/
+├── distribution.yaml   name, version, description, hermes_requires, env_requires, distribution_owned
+├── SOUL.md             persona / rules              (distribution-owned: replaced on update)
+├── config.yaml         model, toolsets, delegation… (installed on create; preserved on update)
+├── profile.yaml        description the kanban orchestrator routes on
+├── .no-bundled-skills  opt-out of bundled-skill seeding (Hermes still seeds `hermes-agent`)
+├── skills/             every skill the profile runs with, vendored: hub-installed (skills.sh,
+│   └── .hub/lock.json  official) and local ones alike; the lock keeps `hermes skills check|update` working
+├── plugins.txt         optional — `hermes plugins install` argument lines (engineer: superpowers, pinned commit)
+├── setup.sh            optional — runs in the container as the runtime user after install/update
+└── mcp/                health: the MCP servers' sources and lockfiles setup.sh builds (hevy, yazio, renpho)
+```
+
+```bash
+sudo ./profiles.sh install [name…]    # create missing profiles, update existing ones (install.sh runs this)
+sudo ./profiles.sh export  [name…]    # live profile → profiles/<name>/ after you changed a SOUL, installed a skill…
+sudo ./profiles.sh diff    [name…]    # what export would change
+sudo ./profiles.sh status             # repo version vs live, skills, plugins
+```
+
+`install` stages `profiles/<name>/` under `data/distributions/<name>/`, runs `hermes profile
+install` (new or adopted profile) or `hermes profile update` (already a distribution: `config.yaml`
+is **preserved**, pass `--force-config` to overwrite it), merges the hub lock, seeds the essential
+bundled skill, makes sure the profile `.env` holds an `API_SERVER_KEY` (the multiplexed gateway
+needs one per profile for `/p/<name>/v1`), reports required `env_requires` keys missing from the
+profile and root `.env`, installs `plugins.txt`, runs `setup.sh`, and restarts the gateway when it
+created a profile. Memories, sessions, `auth.json`, `.env`, and skills or plugins you added by hand
+are never touched. Workflow after editing on the live agent: `sudo ./profiles.sh export <name>`,
+review `git diff profiles/<name>`, bump `version:` in `distribution.yaml`, commit; on another VPS
+`git pull && sudo ./profiles.sh install`.
+
+Secrets never enter `profiles/`: the live `data/profiles/<name>/.env` is user-owned, keys are
+declared in `env_requires` (Hermes writes a `.env.EXAMPLE` next to it) and, here, mostly supplied by Bitwarden Secrets
+Manager at runtime (`BWS_ACCESS_TOKEN`). The default profile (`data/SOUL.md`, `USER.md`,
+`MEMORY.md`) is personal memory, not versioned.
 
 ## Orca remote server (optional, on the host)
 
@@ -243,12 +288,25 @@ directories: `orca.sh install` copies only the agent's **credential files** (`.c
 login; both sides refresh their tokens on their own), and sessions start in `ORCA_HOME/work`.
 
 ```bash
-sudo ./orca.sh install         # user orca, Xvfb + Electron libs, Node 22, claude/codex/grok/gh, Orca, orca.service, logins; prints the pairing link
+sudo ./orca.sh install         # user orca, Xvfb + Electron libs, Node 22, claude/codex/grok/gh, Orca, orca.service, logins, stack ACLs; prints the pairing link
 sudo ./orca.sh pair mobile     # phone: scan the printed QR (phone on the tailnet); `pair desktop` = runtime link (each restarts orca.service)
 sudo ./orca.sh creds           # re-copy the agent's logins after `auth.sh <cli>` (or if Orca's copy expired)
+sudo ./orca.sh share           # re-apply orca's read-write ACLs on this checkout (install/update do it too)
 sudo ./orca.sh login claude    # or log in as user orca with a different account (claude|codex|grok|gh)
 sudo ./orca.sh status | logs
 ```
+
+**Editing this stack from Orca.** Open `/srv/hermes/stack` as a project in the Orca app: Claude /
+Codex / Grok sessions can change it in place and run `sudo ./install.sh`, `sudo ./auth.sh …`,
+`docker compose …` from there. The checkout is not mounted in the agent container, so nothing in
+it is agent-written and the reason for the separate user does not apply to it. `orca.sh install`
+(and `update`, `share`) keeps the operator as owner (`harden.sh`, root's git rely on that) and adds
+POSIX ACLs: `user:orca:rwX` plus default entries on every directory, so files created by either
+user — or by root running a script — are read-write for both, whatever the umask (`getfacl
+/srv/hermes/stack` shows them, `ls -l` a `+`). `.env` is the exception: `install.sh` keeps it
+`0600` for the owner, a session reads it with `sudo`. Orca's `~/.gitconfig` trusts the directory
+(`safe.directory`); files a session creates belong to `orca` (`ls -l`), harmless while the ACLs
+are there and `orca.sh remove` prints the `chown -R` to take them back.
 
 Sharing code with the agent: through git remotes (`gh` is logged in on both sides). Do not point
 Orca at `/srv/hermes/workspace` — it belongs to the container's uid, so git refuses it ("dubious
@@ -260,9 +318,10 @@ prints one pairing link per run (runtime link by default, mobile-scoped with `--
 already-paired devices keep their tokens, so switching modes to add another device is fine. The
 printed browser URL (`http://<tailscale-ip>:6768/web-index.html#pairing=…`) also works from any
 browser on the tailnet. **Treat the link like a root password**: whoever holds it runs commands as
-`orca` (passwordless sudo, docker group). Orca listens on `ORCA_PORT` (6768), advertises
-`DESKTOP_BIND` (the Tailscale IP) to clients, and the firewall from `harden.sh` keeps it off the
-Internet. Orca prints the link on every start, so it also sits in `journalctl -u orca` (root /
+`orca` (passwordless sudo, docker group). Orca listens on `0.0.0.0:ORCA_PORT` (6768 — `serve` has
+no bind option) and advertises `DESKTOP_BIND` (the Tailscale IP) to clients; `orca.service` adds
+INPUT rules at every start (accept on `tailscale0` and `lo`, drop elsewhere — `orca.sh status`
+shows them) and the firewall from `harden.sh` is the second layer. Orca prints the link on every start, so it also sits in `journalctl -u orca` (root /
 `adm` readable, kept up to a month); `orca.sh` only echoes it to a terminal, never into the
 `hermes-update` journal. Orca state (projects, pairings, secrets — unencrypted, no keyring) lives
 in `ORCA_HOME/.config/orca`; `ORCA_HOME` is part of the backups when it exists.
@@ -276,8 +335,8 @@ of every weekly update — resolves the current GitHub release, installs it only
 (sessions are restarted then), and refreshes the host CLIs with `npm -g`. `sudo ./orca.sh rollback`
 goes back to the previous release and puts Orca updates on hold (`/opt/orca/.hold`) until
 `sudo ./orca.sh update --force`. Pin with `ORCA_VERSION=vX.Y.Z` in `.env`. `sudo ./orca.sh remove`
-drops the service, the sudoers fragment and `/opt/orca` (keeps Node, the CLIs, the `orca` user and
-`ORCA_HOME`: `sudo userdel -r orca` to drop those too).
+drops the service, the sudoers fragment, `/opt/orca` and the ACLs on this checkout (keeps Node,
+the CLIs, the `orca` user and `ORCA_HOME`: `sudo userdel -r orca` to drop those too).
 
 The agent container itself has no Docker (only Traefik sees the daemon, read-only, through the
 socket proxy): Hermes can write a compose project, you or an Orca session deploy it — from a
@@ -368,7 +427,8 @@ now and then.
    If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of `ORCA_HOME`
    (pairings, state). Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
 
-All OAuth logins, memory, sessions and skills come back with `data/`. Hermes-only alternative
+All OAuth logins, memory, sessions and skills come back with `data/` (the profiles' SOUL/config/skills
+are also in this repo: `sudo ./profiles.sh install` alone rebuilds them without a backup). Hermes-only alternative
 into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backups/<zip>`.
 
 ## Files & Python
@@ -389,6 +449,7 @@ docker compose logs -f hermes-agent        # gateway + dashboard (s6-supervised)
 docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
 sudo ./auth.sh status                       # logins, update hold, backup timer, orca (host), obsidian
+sudo ./profiles.sh status                   # agent profiles: repo version vs live, skills, plugins
 sudo ./update.sh                            # rebuild on latest base image (no cache), pull, recreate (auto-rollback if unhealthy)
 sudo ./update.sh rollback                   # back to the images that ran before the last update, and hold
 sudo ./update.sh resume                     # lift the hold
@@ -409,11 +470,13 @@ ends with `orca.sh update` (host CLIs + Orca release, own `previous`/`rollback`,
 the image rollback).
 
 **Healing.** `hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks
-unhealthy, starts exited ones (Docker's own restart policy only reacts to a process exiting) and
-recreates `hermes-agent` when it is the one unhealthy. It stays idle when
-nothing in the project runs (`docker compose down`), while `update.sh` runs, and while
-`/srv/hermes/stack/.maintenance` exists — **touch that file before `docker compose stop <service>`**,
-otherwise the service is back within a minute.
+unhealthy or stuck in Docker's `restarting` loop, starts exited ones (Docker's own restart policy
+only reacts to a process exiting) and recreates `hermes-agent` when it is the one unhealthy — at
+most 3 times in a row (`HEAL_MAX_AGENT_RECREATES`): a container that never comes back healthy is
+then left alone and `.maintenance` is written with the reason, instead of its sessions being killed
+every few minutes forever. It stays idle when nothing in the project runs (`docker compose down`),
+while `update.sh` runs, and while `/srv/hermes/stack/.maintenance` exists — **touch that file
+before `docker compose stop <service>`**, otherwise the service is back within a minute.
 
 **Restarting the agent:** `docker compose up -d --force-recreate hermes-agent` (recreate, so a
 changed `.env` / `data/.env` is picked up; `docker compose restart hermes-agent` is fine for a
@@ -435,7 +498,7 @@ Traefik access log is off. There is no monitoring or alerting in this stack. Not
 | Secret | Then |
 |---|---|
 | `API_SERVER_KEY` | `docker compose up -d --force-recreate hermes-agent` |
-| `API_SERVER_KEY` of a profile (`profiles/<name>/.env`) | nothing — the gateway reads the profile `.env` per request |
+| `API_SERVER_KEY` of a profile (`data/profiles/<name>/.env`) | nothing — the gateway reads the profile `.env` per request |
 | `DESKTOP_PASSWORD` / `DESKTOP_SECRET` | `docker compose up -d --force-recreate hermes-agent` (no effect while an external secret source supplies `HERMES_DASHBOARD_BASIC_AUTH_*` — rotate it there) |
 | `CF_DNS_API_TOKEN` | `docker compose up -d --force-recreate traefik` |
 | `RESTIC_PASSWORD` | `sudo ./backup.sh restic key add` (asks the new one), then `key remove <old id>` — only then edit `.env` |
@@ -475,10 +538,11 @@ Node, Xvfb and the Electron libraries.
 | `dns/` | `alpine` + `dnsmasq`: authoritative-only answers for `DNS_ZONE`/`*.DNS_ZONE` → Tailscale IP, for Tailscale split DNS |
 | `hermes/Dockerfile` | `FROM nousresearch/hermes-agent:latest` + `gh`, `tmux`, `jq`, `psql` + `@anthropic-ai/claude-code`, `@openai/codex`, `@xai-official/grok` |
 | `obsidian/Dockerfile` | `FROM node:22-bookworm-slim` + `obsidian-headless` (`ob sync --continuous`) |
-| `orca.sh` / `orca/orca.service` | Orca on the host: deps + Node + CLIs, sha512-verified AppImage under `/opt/orca/<tag>`, systemd unit template (install / update / rollback / pair / remove) |
+| `orca.sh` / `orca/orca.service` | Orca on the host: deps + Node + CLIs, sha512-verified AppImage under `/opt/orca/<tag>`, systemd unit template, ACLs so sessions edit this checkout (install / update / rollback / pair / share / remove) |
 | traefik (compose `command:`) | static config as flags: 80→443 redirect, docker provider via `docker-socket-proxy`, `cloudflare` ACME resolver |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
 | `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / upgrade with `:previous` rollback |
+| `profiles.sh` / `profiles/<name>/` | the agents as Hermes profile distributions: SOUL.md, config.yaml, vendored skills, plugins.txt, setup.sh (install / export / diff / status) |
 | `backup.sh` / `heal.sh` | restic → B2 backups / self-healing |
 | `systemd/` | `hermes-backup`, `hermes-update`, `hermes-heal` service + timer templates |
 | `lib/common.sh` | shared helpers |

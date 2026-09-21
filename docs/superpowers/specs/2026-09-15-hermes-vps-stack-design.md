@@ -349,3 +349,64 @@ data (weight, training…) in tables without any extra setup. Live data dir unde
 `POSTGRES_DIR/data` (bind mount, postgres-owned); `backup.sh` takes a `pg_dumpall --clean` into
 `POSTGRES_DIR/dumps` (7 kept) which restic uploads instead of the live dir. `install.sh`
 generates `POSTGRES_PASSWORD`. Other compose projects may join `hermes-data` (external network).
+
+## Addendum — Orca sessions edit the stack in place (2026-09-19)
+
+The operator wants to change this stack from Orca (Claude / Codex / Grok) rather than from SSH.
+Chosen over running `orca.service` as the operator user: keep user `orca` and share the checkout.
+`orca.sh share` (run by `install` and `update`) puts POSIX ACLs on `STACK_DIR` — `user:orca:rwX`
+and `user:<owner>:rwX`, access and default entries — so ownership stays the operator's (harden.sh
+`chown -R`, root's git) while both users get read-write on every file, existing or created later by
+either of them or by root running a script, independent of umask (a default ACL replaces the umask
+in the create mode). `.env` keeps `0600` (ACLs stripped, `sudo` to read); `safe.directory` is added
+to `orca`'s own gitconfig. This does not reopen the 2026-09-17 finding: the stack checkout is not
+mounted in the agent container, so nothing in it is agent-written; the workspace and `data/home`
+stay off-limits to Orca. `acl` joins the host packages; `orca.sh remove` runs `setfacl -b`.
+
+## Addendum — hermes-workspace removed, the image's dashboard behind Traefik (2026-09-19)
+
+Supersedes every `hermes-workspace` mention above (architecture list, diagram, component 3,
+`update.sh` health list): the third-party web UI and its loopback `hermes-dashboard` companion are
+gone (commit `9d23646`). The Hermes image's own s6-supervised dashboard (`HERMES_DASHBOARD=1`)
+listens on `0.0.0.0:DESKTOP_PORT` inside `hermes-agent` with its username/password gate; Traefik
+routes `https://HERMES_HOST` to it and the raw port stays published on `DESKTOP_BIND` for Hermes
+Desktop. `WORKSPACE_HOST` became `HERMES_HOST` (`install.sh` migrates `.env`);
+`WORKSPACE_PROFILE`, `WORKSPACE_API_TOKEN`, `WORKSPACE_MEM_LIMIT` and `HERMES_PASSWORD` are
+retired. The container command is pinned to `hermes -p default gateway run` and the healthcheck
+probes `/p/default/health`: a bare `hermes` follows the dashboard's sticky `active_profile`, and a
+per-profile gateway that starts first steals `127.0.0.1:8642` from the multiplexer.
+
+## Addendum — profiles as code (`profiles.sh`, 2026-09-19)
+
+Every directory under `profiles/` is a Hermes *profile distribution* (`hermes profile
+install|update`): `SOUL.md`, `config.yaml`, `profile.yaml`, `distribution.yaml`, the vendored
+skills (hub and local alike, plus `skills/.hub/lock.json` so `hermes skills check|update` still
+knows their origin), optional `plugins.txt` and `setup.sh`. `sudo ./profiles.sh install` stages
+them under `data/distributions/<name>` (root, then chowned to the runtime uid, `no_symlink` on
+every path the container could have replaced), lets Hermes apply them inside the container,
+merges the hub lock, seeds the essential bundled skills, generates a missing `API_SERVER_KEY`
+and reports `env_requires` still unset; `export` does the reverse for review with `git diff`
+(runtime state — `.curator_*`, `.locks/`, usage files — excluded), `status` and `diff` compare.
+`config.yaml` is preserved on update unless `--force-config`; memories, sessions, `.env` and
+hand-installed skills are never touched. Secrets live in `data/profiles/<name>/.env` (or
+Bitwarden), never in `profiles/`.
+
+## Addendum — review fixes (2026-09-21)
+
+Second four-way review (security, scripts, infra, profiles/docs). Fixed: `backup.sh setup` could
+never initialise a repository from a terminal (`restic_run` allocated a pty, docker then merged
+restic's stderr into stdout and the "Is there a repository" check saw nothing — `-t` only when
+stdout is a terminal too); `profiles.sh` chmod/chown/rsync'd through `data/distributions` and
+`data/profiles/<name>` without `no_symlink`, and `export` dereferenced symlinks into the repo;
+`heal.sh` recreated a never-healthy `hermes-agent` forever (now 3 attempts, then `.maintenance`)
+and ignored the `restarting` state; `hermes-agent` kept Docker's default capabilities (now
+`cap_drop: ALL` + the seven s6 needs, verified on a throwaway container); `obsidian-sync` had no
+healthcheck, no `cap_drop` and sat on the implicit default network (own `hermes-obsidian`
+network, sync.log-freshness healthcheck); Orca listens on `0.0.0.0` — `serve` has no bind option,
+`--pairing-address` is only advertised — so `orca.service` now pins `ORCA_PORT` to `tailscale0` +
+`lo` with its own INPUT rules (independent of ufw, whose anti-lockout guard can disable it) and
+the README no longer claims Orca binds the Tailscale IP; the dockerd wait-for-Tailscale drop-in
+moved to `lib/common.sh` and is installed by `install.sh` too (Debian path); `install.sh` no longer
+warns about our own `hermes-dns` on :53; `update.sh save_previous` falls back to the image ref
+quietly under the containerd image store. Bot tokens found in a stray `discord.txt` (never
+committed) are now git-ignored and must be rotated.

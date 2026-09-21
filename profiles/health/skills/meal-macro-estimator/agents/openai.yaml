@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meal Macro Estimator"
+  short_description: "Estimer kcal et macros depuis une photo de repas."
+  default_prompt: "Estime ce repas au restaurant depuis les photos avec des fourchettes sourcées."

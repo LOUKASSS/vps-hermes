@@ -10,6 +10,12 @@ User=@USER@
 Group=@GROUP@
 EnvironmentFile=/etc/orca.env
 WorkingDirectory=@WORKDIR@
+# Orca has no bind option: `serve` listens on 0.0.0.0 and --pairing-address is only the address
+# it advertises. These INPUT rules (root, hence the `+`) keep ORCA_PORT reachable from the tailnet
+# and loopback only — independently of ufw, which harden.sh's anti-lockout guard can switch off.
+# Absolute paths: /etc/orca.env sets a PATH without /usr/sbin. Idempotent (-C before -I); re-run by every restart, so `ufw enable` flushing INPUT is repaired
+# by `systemctl restart orca` (harden.sh does it).
+ExecStartPre=+/bin/sh -c 'for t in /usr/sbin/iptables /usr/sbin/ip6tables; do [ -x $t ] || continue; $t -C INPUT -p tcp --dport "$ORCA_PORT" -j DROP 2>/dev/null || $t -I INPUT 1 -p tcp --dport "$ORCA_PORT" -j DROP; for i in tailscale0 lo; do $t -C INPUT -i $i -p tcp --dport "$ORCA_PORT" -j ACCEPT 2>/dev/null || $t -I INPUT 1 -i $i -p tcp --dport "$ORCA_PORT" -j ACCEPT; done; done'
 # ORCA_PAIRING is "" or "--mobile-pairing" (unquoted on purpose). Orca starts its own Xvfb.
 ExecStart=/bin/sh -c 'exec /opt/orca/current/AppRun serve --port "$ORCA_PORT" --pairing-address "$DESKTOP_BIND" $ORCA_PAIRING'
 Restart=always

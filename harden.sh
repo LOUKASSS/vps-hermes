@@ -97,6 +97,7 @@ if [ "$STACK_DIR" != "$HERMES_ROOT/stack" ]; then
 fi
 # Only the stack checkout: data dirs are chowned by install.sh (HERMES_UID) and orca.sh owns
 # $HERMES_ROOT/orca — a blanket chown -R here would hand them to the operator on every re-run.
+# (chown keeps the ACLs `orca.sh share` put on the checkout for Orca sessions.)
 chown "$OP_USER:$OP_USER" "$HERMES_ROOT"
 chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT/stack"
 
@@ -188,18 +189,9 @@ if [ ! -f /etc/docker/daemon.json ]; then
 DOCKER
 fi
 
-# Published ports bind the Tailscale IP: make dockerd wait (up to 60 s) for tailscaled to have
-# it at boot, or the containers fail to start until heal.sh runs.
-install -d /etc/systemd/system/docker.service.d
-cat > /etc/systemd/system/docker.service.d/10-tailscale.conf <<'UNIT'
-[Unit]
-After=tailscaled.service
-Wants=tailscaled.service
-
-[Service]
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker: no Tailscale IP after 60 s, starting anyway" >&2'
-UNIT
-systemctl daemon-reload
+# dockerd waits for the Tailscale IP at boot (drop-in; tailscale is installed in step 7, so
+# this is a no-op on the first pass and install.sh adds it once Tailscale is there).
+docker_wait_for_tailscale
 
 # ── 7. Tailscale ─────────────────────────────────────────────────────────
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -277,6 +269,11 @@ systemctl enable ufw >/dev/null 2>&1 || true
 if systemctl is-active --quiet docker 2>/dev/null; then
   info "Docker is running — restarting it so its iptables chains are rebuilt"
   systemctl restart docker
+fi
+# Same for orca.service: its ExecStartPre re-adds the INPUT rules that pin port ORCA_PORT to the tailnet.
+if systemctl is-active --quiet orca 2>/dev/null; then
+  info "Orca is running — restarting it so its port rules are re-added"
+  systemctl restart orca
 fi
 ufw status verbose | sed 's/^/    /'
 

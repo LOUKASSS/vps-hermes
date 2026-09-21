@@ -1,0 +1,108 @@
+model:
+  default: gpt-6-astra
+  provider: openai-codex
+  base_url: https://chatgpt.com/backend-api/codex
+  api_mode: codex_responses
+  aliases:
+    astra: openai-codex/gpt-6-astra
+    sol: openai-codex/gpt-5.6-sol
+    terra: openai-codex/gpt-5.6-terra
+    luna: openai-codex/gpt-5.6-luna
+    grok: xai-oauth/grok-4.6
+toolsets:
+  - kanban
+  - memory
+  - session_search
+  - skills
+  - clarify
+  - todo
+  - cronjob
+agent:
+  max_turns: 40
+  reasoning_effort: medium
+terminal:
+  cwd: /opt/data/profiles/chief/workspace
+  home_mode: profile
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  provider: honcho
+delegation:
+  model: gpt-5.6-terra
+  provider: openai-codex
+  max_iterations: 15
+  child_timeout_seconds: 180
+  reasoning_effort: low
+  max_concurrent_children: 2
+  max_spawn_depth: 1
+  subagent_auto_approve: false
+curator:
+  consolidate: false
+approvals:
+  mode: manual
+plugins:
+  enabled: []
+security:
+  redact_secrets: true
+cron:
+  allow_agent_scheduling: false
+  model: gpt-5.6-luna
+  model_provider: openai-codex
+  max_parallel_jobs: 1
+kanban:
+  dispatch_in_gateway: false
+  orchestrator_profile: chief
+  default_assignee: chief
+  max_in_progress: 2
+  max_in_progress_per_profile: 1
+  auto_decompose: false
+_config_version: 45
+platform_toolsets:
+  cli:
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - clarify
+    - todo
+    - cronjob
+  api_server:
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - clarify
+    - todo
+    - cronjob
+  telegram:
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - clarify
+    - todo
+    - cronjob
+  discord:
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - clarify
+    - todo
+    - cronjob
+  slack:
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - clarify
+    - todo
+    - cronjob
+secrets:
+  bitwarden:
+    enabled: true
+    project_id: c32ad2e8-7cae-492d-9c6a-b4ca012dae35
+    server_url: https://vault.bitwarden.eu
+discord:
+  require_mention: true
+  thread_require_mention: true

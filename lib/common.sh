@@ -17,6 +17,23 @@ need_root() {
   [ "${EUID:-$(id -u)}" -eq 0 ] || die "Run as root (sudo $0)."
 }
 
+# Published ports bind the Tailscale IP (DESKTOP_BIND): make dockerd wait (up to 60 s) for
+# tailscaled to have it at boot, or every container with a published port fails to start until
+# heal.sh kicks it. Called by harden.sh (Ubuntu) and install.sh (any distro with Tailscale).
+docker_wait_for_tailscale() {
+  command -v tailscale >/dev/null 2>&1 || return 0
+  install -d /etc/systemd/system/docker.service.d
+  cat > /etc/systemd/system/docker.service.d/10-tailscale.conf <<'UNIT'
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker: no Tailscale IP after 60 s, starting anyway" >&2'
+UNIT
+  systemctl daemon-reload
+}
+
 # .env is sourced, not exported wholesale: only the restic/B2 variables restic_run passes with
 # `-e NAME` are exported, so child processes (npm, apt, curl|sh installers, docker build) never
 # inherit the CF token, API key or passwords. compose reads .env itself.
@@ -144,7 +161,9 @@ obsidian_exec() {
 #   restic_run [--rw <hostdir>] <restic args…>     (--rw mounts <hostdir> at /restore, writable)
 restic_run() {
   local tty=() rw=() orca=()
-  [ -t 0 ] && tty=(-it)
+  # -t only when stdout is a terminal too: under a pty docker merges restic's stderr into
+  # stdout, so a caller capturing stderr ($(… 2>&1 >/dev/null)) would get nothing.
+  [ -t 0 ] && [ -t 1 ] && tty=(-it)
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
   [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
   docker run --rm "${tty[@]}" "${rw[@]}" --name "hermes-restic-$$" --hostname hermes-vps \

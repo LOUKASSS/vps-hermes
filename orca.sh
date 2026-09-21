@@ -8,18 +8,24 @@
 # ~/.codex/config.toml MCP commands, .git/hooks of a checkout…) would run as a sudo user the next
 # time an Orca session touched it. Only the credential FILES of the agent's claude / codex / grok /
 # gh logins are copied over (`orca.sh creds`); config files never are.
+# The stack checkout itself (this directory) IS shared: it is not mounted in the agent container,
+# so nothing in it is agent-written, and `orca.sh share` gives orca read-write on it (POSIX ACLs
+# next to the operator's ownership + safe.directory in orca's gitconfig) so Orca sessions can edit
+# the stack in place and run its scripts with sudo.
 #
 #   sudo ./orca.sh install            # user orca, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
 #   sudo ./orca.sh update [--force]   # new release? download, verify, switch (previous kept), restart
 #   sudo ./orca.sh rollback           # back to the previous release
 #   sudo ./orca.sh pair [desktop|mobile]   # restart + print the pairing link / mobile QR
 #   sudo ./orca.sh creds              # re-copy the agent's login files into ORCA_HOME (after auth.sh)
+#   sudo ./orca.sh share              # re-apply orca's read-write ACLs on this stack checkout
 #   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as user orca instead (separate account)
 #   sudo ./orca.sh status | logs | remove
 #
 # Layout: /opt/orca/<tag>/ (extracted AppImage) · /opt/orca/current, /opt/orca/previous (symlinks)
 #         /usr/local/bin/orca · /etc/orca.env (from .env) · /etc/systemd/system/orca.service
 #         ORCA_HOME/ (0700 orca: .config/orca state, logins, work/ = default cwd of sessions)
+#         STACK_DIR (this checkout): owner unchanged, ACL user:orca:rwX + default ACL, .env stays 600
 set -euo pipefail
 
 # shellcheck disable=SC1091
@@ -81,6 +87,33 @@ as_orca() {
     PATH=/usr/local/bin:/usr/bin:/bin TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" "$@"
 }
 
+# Let Orca sessions edit this stack checkout in place. Ownership stays the operator's (harden.sh
+# chown -R, root's git): ACL entries give the owner AND orca rw on every existing file, and the
+# default entries make files either of them (or root running a script here) creates rw for both,
+# whatever the creator's umask. .env is left alone: install.sh keeps it 0600 for the owner, an
+# Orca session reads it with sudo. orca's global gitconfig trusts the directory (git refuses a
+# repository owned by someone else: "dubious ownership"). Idempotent; `orca.sh share` re-applies.
+# Yes, that includes .git/ (hooks, config) and the scripts root's timers run: no privilege is
+# gained, `orca` already has passwordless sudo — the boundary is the pairing link, not the ACL.
+stack_owner() { stat -c %U "$STACK_DIR"; }
+share_stack() {
+  local owner; owner="$(stack_owner)"
+  command -v setfacl >/dev/null 2>&1 || die "setfacl missing: apt-get install acl (orca.sh install does)"
+  info "Sharing $STACK_DIR (owner $owner) with user $ORCA_USER (ACLs)…"
+  setfacl -R -m "u:$owner:rwX,u:$ORCA_USER:rwX" -m "d:u:$owner:rwX,d:u:$ORCA_USER:rwX" "$STACK_DIR"
+  [ -f "$STACK_DIR/.env" ] && setfacl -b "$STACK_DIR/.env" && chmod 600 "$STACK_DIR/.env"
+  as_orca git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$STACK_DIR" \
+    || as_orca git config --global --add safe.directory "$STACK_DIR"
+}
+unshare_stack() {
+  command -v setfacl >/dev/null 2>&1 && setfacl -R -b "$STACK_DIR"
+  id "$ORCA_USER" >/dev/null 2>&1 && as_orca git config --global --fixed-value --unset-all safe.directory "$STACK_DIR" 2>/dev/null || true
+}
+stack_shared() {
+  getfacl -p "$STACK_DIR" 2>/dev/null | grep -q "^user:$ORCA_USER:rw" \
+    && as_orca git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$STACK_DIR"
+}
+
 # ── host dependencies ────────────────────────────────────────────────────
 # First package name apt knows (Ubuntu 24.04 uses t64 names, 22.04 does not).
 apt_pick() { local n; for n in "$@"; do apt-cache show "$n" >/dev/null 2>&1 && { echo "$n"; return; }; done; die "no apt candidate for $1 (unsupported Ubuntu release?)"; }
@@ -88,7 +121,7 @@ apt_pick() { local n; for n in "$@"; do apt-cache show "$n" >/dev/null 2>&1 && {
 install_deps() {
   info "Installing Xvfb + Electron headless libraries…"
   apt-get update -q
-  local pkgs=(xvfb file zlib1g curl ca-certificates git libnss3 libgbm1 libxtst6 libdrm2 libxkbcommon0
+  local pkgs=(xvfb file zlib1g acl curl ca-certificates git libnss3 libgbm1 libxtst6 libdrm2 libxkbcommon0
     libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxrender1 libx11-xcb1 libxcb-dri3-0 libxss1)
   local p
   for p in "libgtk-3-0t64 libgtk-3-0" "libatk1.0-0t64 libatk1.0-0" "libatk-bridge2.0-0t64 libatk-bridge2.0-0" \
@@ -217,8 +250,12 @@ print_pairing() {
   Mobile app    : scan the QR above / open the link on the phone (must be on the tailnet)
   Sessions run as user $ORCA_USER (HOME=$ORCA_HOME, cwd $ORCA_WORKDIR) with docker and sudo — this being
   the host. Treat the link like a root password. Logins: copies of the agent's (sudo $0 creds), or
-  your own (sudo $0 login claude|codex|grok|gh). Share code with the agent through git remotes, not
-  by opening $HERMES_WORKSPACE_DIR (owned by the container's uid; git refuses it as "dubious ownership").
+  your own (sudo $0 login claude|codex|grok|gh).
+  This stack     : open $STACK_DIR as a project — $ORCA_USER can edit it in place (ACLs) and run
+                   its scripts with sudo; .env stays 0600 (read it with sudo). Re-apply: sudo $0 share
+  Agent's code   : through git remotes, not by opening $HERMES_WORKSPACE_DIR (owned by the
+                   container's uid; git refuses it as "dubious ownership", and the point of the
+                   separate user is that Orca never executes what the agent wrote in place).
 MSG
 }
 
@@ -240,11 +277,13 @@ do_install() {
   fetch_release "${ORCA_VERSION:-latest}"
   activate "$FETCHED_TAG"
   sync_creds
+  share_stack
   write_service
   systemctl enable -q orca
   if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
-    warn "ufw is not active: port $ORCA_PORT is reachable from wherever this host is (harden.sh sets up the firewall)."
+    warn "ufw is not active: only orca.service's own INPUT rules keep port $ORCA_PORT off the WAN (harden.sh sets up the firewall)."
   fi
+  [ -x /usr/sbin/iptables ] || warn "/usr/sbin/iptables not found: orca.service cannot restrict port $ORCA_PORT to the tailnet itself (apt install iptables, or rely on ufw)."
   restart_and_pair
 }
 
@@ -258,6 +297,7 @@ do_update() {
   fi
   [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
   install_clis
+  share_stack   # files pulled by update.sh get the default ACL; a stray chmod does not
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -305,8 +345,11 @@ do_status() {
   if [ -e "$ORCA_ROOT/current" ]; then
     echo "orca $(installed_version) (previous: $(cat "$ORCA_ROOT/previous/VERSION" 2>/dev/null || echo none))  orca.service: $(systemctl is-active orca 2>/dev/null)$([ -e "$ORCA_ROOT/.hold" ] && echo "  UPDATES ON HOLD (update --force)")"
     echo "listening: $(ss -ltnH "sport = :$ORCA_PORT" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')  advertised: ${DESKTOP_BIND:-?}:$ORCA_PORT  pairing: $([ -n "${ORCA_PAIRING:-}" ] && echo mobile || echo desktop)"
+    echo "input rules: $(/usr/sbin/iptables -S INPUT 2>/dev/null | grep -c -- "--dport $ORCA_PORT " || echo 0)/3 (tailscale0 + lo accept, else drop)  ufw: $(ufw status 2>/dev/null | sed -n 's/^Status: //p' || echo n/a)"
     echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR"
     local f; for f in "${CRED_FILES[@]}"; do [ -f "$ORCA_HOME/$f" ] && echo "  login: $f" || echo "  no login: $f"; done
+    if stack_shared; then echo "stack $STACK_DIR: read-write for $ORCA_USER (owner $(stack_owner), ACLs)"
+    else echo "stack $STACK_DIR: NOT shared with $ORCA_USER (sudo $0 share)"; fi
   else
     echo "not installed (sudo $0 install)"
   fi
@@ -317,7 +360,8 @@ do_remove() {
   rm -f "$ORCA_UNIT" "$ORCA_ENV" "$ORCA_SUDOERS" /usr/local/bin/orca
   systemctl daemon-reload
   rm -rf "$ORCA_ROOT"
-  info "Orca removed. Kept: Node + claude/codex/grok/gh on the host, user $ORCA_USER and $ORCA_HOME (state, logins, work/): sudo userdel -r $ORCA_USER"
+  unshare_stack
+  info "Orca removed ($STACK_DIR is the owner's alone again; files $ORCA_USER created there keep that owner: chown -R $(stack_owner) $STACK_DIR). Kept: Node + claude/codex/grok/gh on the host, user $ORCA_USER and $ORCA_HOME (state, logins, work/): sudo userdel -r $ORCA_USER"
 }
 
 case "${1:-}" in
@@ -326,9 +370,10 @@ case "${1:-}" in
   rollback) do_rollback ;;
   pair)     do_pair "${2:-desktop}" ;;
   creds)    id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"; sync_creds ;;
+  share)    id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"; share_stack ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
   remove)   do_remove ;;
-  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | login <claude|codex|grok|gh> | status | logs | remove" ;;
+  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | login <claude|codex|grok|gh> | status | logs | remove" ;;
 esac

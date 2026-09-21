@@ -145,6 +145,11 @@ services:
     cpus: ${AGENT_CPUS:-6}
     pids_limit: 4096   # LLM-driven shells: a fork bomb stays inside the container
     security_opt: *nnp
+    # s6 runs as root only to remap the hermes uid (usermod), chown /opt/data, fix the supervise/
+    # trees and signal the services it drops to (s6-setuidgid). The LLM's shells run as hermes
+    # and lose the default extras (NET_RAW, MKNOD, SYS_CHROOT, SETFCAP, AUDIT_WRITE…).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID]
     environment:
       <<: *hermes-uid
       # Dashboard (web UI + Hermes Desktop backend), reached through Traefik and on DESKTOP_BIND.
@@ -154,6 +159,10 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${DESKTOP_USERNAME:-admin}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD:?set by install.sh}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET:?set by install.sh}
+      # Every Hermes profile has its own HOME, but GitHub authentication and the Git
+      # credential helper are intentionally shared across profiles. auth.sh writes here.
+      GH_CONFIG_DIR: /opt/data/home/.config/gh
+      GIT_CONFIG_GLOBAL: /opt/data/home/.gitconfig
       # Gateway HTTP API (OpenAI-compatible; named profiles at /p/<name>/… with their own key).
       # Loopback only: nothing outside the container uses it (curl from the agent's terminal does).
       API_SERVER_ENABLED: "true"
@@ -290,6 +299,7 @@ services:
     memswap_limit: 1g
     pids_limit: 256
     security_opt: *nnp
+    cap_drop: [ALL]   # runs as the runtime user from the start: nothing to keep
     profiles: ["obsidian"]
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
     environment:
@@ -298,6 +308,16 @@ services:
     volumes:
       - ${OBSIDIAN_DIR:-/srv/hermes/obsidian}:/data
       - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}/${OBSIDIAN_VAULT_DIR:-vault}:/vault
+    networks:
+      - obsidian
+    healthcheck:
+      # `ob sync --continuous` appends to its sync.log every 30 s ("Fully synced" or the change
+      # list); a client hung on the Obsidian Sync websocket stays "Up" but stops writing it.
+      test: ["CMD-SHELL", "find /data/.config/obsidian-headless/sync -name sync.log -mmin -5 | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
 networks:
   proxy:
@@ -309,6 +329,10 @@ networks:
   # name: hermes-data}}`) to use the database with the same credentials.
   data:
     name: hermes-data
+  # obsidian-sync only talks to the Obsidian Sync servers: its own network, no path to the
+  # agent, Traefik or the database.
+  obsidian:
+    name: hermes-obsidian
   dns:
     name: hermes-dns
     # Not `internal` (that would drop the published :53); no masquerading instead, so the

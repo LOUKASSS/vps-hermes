@@ -32,7 +32,7 @@ EXCLUDES=(
 )
 
 configured() { [ -n "${B2_ACCOUNT_ID:-}" ] && [ -n "${B2_ACCOUNT_KEY:-}" ] && [ -n "${RESTIC_PASSWORD:-}" ]; }
-require_configured() { configured || die "Backups not configured. Run: sudo $0 setup"; }
+require_configured() { need_root; configured || die "Backups not configured. Run: sudo $0 setup"; }
 
 do_setup() {
   need_root

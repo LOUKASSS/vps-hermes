@@ -24,7 +24,9 @@ else
   info "Docker already installed: $(docker --version)"
 fi
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing (apt install docker-compose-plugin)."
-command -v openssl >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends openssl; }
+for _pkg in openssl rsync; do   # rsync: profiles.sh stages profiles/ into the data dir
+  command -v "$_pkg" >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends "$_pkg"; }
+done
 
 # ── 2. .env ──────────────────────────────────────────────────────────────
 if [ ! -f .env ]; then
@@ -70,12 +72,14 @@ if [ -n "$TS_IP" ]; then
   esac
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
-  warn "No Tailscale IP found: Traefik (80/443), dashboard (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+  warn "No Tailscale IP found: Traefik (80/443), dashboard (9120) and DNS (53) stay on $(env_val DESKTOP_BIND), Orca (6768) would advertise it. Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
 # Port 53 is published on DESKTOP_BIND; a resolver bound to 0.0.0.0 or to that same IP would clash.
+# Our own hermes-dns (docker-proxy) is not a clash — on a re-run it is already listening there.
 _bind="$(env_val DESKTOP_BIND)"
-if ss -lunH 'sport = :53' 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]|${_bind//./\\.}):"; then
-  warn "something already listens on ${_bind}:53 ($(ss -lunpH 'sport = :53' | awk '{print $4, $NF}' | head -n1)) — the dns service will fail to start until it is moved/stopped."
+_clash="$(ss -lunpH 'sport = :53' 2>/dev/null | grep -v '"docker-proxy"' | awk '{print $4, $NF}' | grep -E "^(0\.0\.0\.0|\*|\[::\]|${_bind//./\\.}):" | head -n1 || true)"
+if [ -n "$_clash" ]; then
+  warn "something already listens on ${_bind}:53 ($_clash) — the dns service will fail to start until it is moved/stopped."
 fi
 
 # Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
@@ -131,6 +135,15 @@ if [ "$(agent_run hermes -p default config get terminal.cwd 2>/dev/null | tr -d 
   agent_run hermes -p default config set terminal.cwd /workspace >/dev/null
 fi
 
+# ── 5b. Agent profiles ───────────────────────────────────────────────────
+# profiles/<name>/ (SOUL.md, config.yaml, skills, plugins.txt, setup.sh) are installed as Hermes
+# profile distributions; profiles.sh restarts the gateway when it created new ones. Re-run after
+# a `git pull` that touched profiles/: sudo ./profiles.sh install
+if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && compgen -G "$STACK_DIR/profiles/*/distribution.yaml" >/dev/null; then
+  info "Installing agent profiles from profiles/…"
+  "$STACK_DIR/profiles.sh" install || warn "profiles.sh install failed — fix and re-run: sudo ./profiles.sh install"
+fi
+
 # Hermes layers its external secret sources (config.yaml secrets.*, e.g. Bitwarden Secrets Manager)
 # over the container env at startup, so HERMES_DASHBOARD_BASIC_AUTH_* coming from there silently
 # replace DESKTOP_USERNAME/DESKTOP_PASSWORD. Try the .env credentials for real (from inside the
@@ -161,6 +174,7 @@ if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
   for unit in "$STACK_DIR"/systemd/*; do
     sed "s|@STACK_DIR@|$STACK_DIR|g" "$unit" > "/etc/systemd/system/$(basename "$unit")"
   done
+  docker_wait_for_tailscale   # ports bind DESKTOP_BIND: dockerd must not start before tailscaled has the IP
   systemctl daemon-reload
   systemctl enable --now hermes-update.timer hermes-heal.timer >/dev/null
   if [ -n "$(env_val B2_ACCOUNT_KEY)" ] && [ -n "$(env_val RESTIC_PASSWORD)" ]; then
@@ -183,6 +197,7 @@ cat <<MSG
   Hermes Desktop: Settings → Gateways → Remote gateway → https://${HERMES_HOST} (or http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}),
                   same user / password
   PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
+  Profiles      : $(ls -d "$STACK_DIR"/profiles/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | xargs || echo none)   (profiles/ → hermes profile install; sudo ./profiles.sh status)
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
   Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
   Backups       : ${backup_note}

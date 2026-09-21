@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Interactive OAuth logins for the Hermes stack. Runs commands inside the running
 # hermes-agent container as the runtime user with HOME=/opt/data/home, so tokens
-# persist on the host under $HERMES_DATA_DIR/home and are visible to agent tool calls.
+# persist on the host under $HERMES_DATA_DIR/home. GitHub is shared by every profile
+# through the container-wide GH_CONFIG_DIR and GIT_CONFIG_GLOBAL settings.
 #
 #   sudo ./auth.sh                 # menu
 #   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell | chat
@@ -54,7 +55,7 @@ do_grok() {
 }
 
 do_gh() {
-  info "GitHub CLI login (device flow)."
+  info "GitHub CLI login (device flow; shared by every Hermes profile)."
   agent_exec gh auth login --web --git-protocol https
   # git pushes over https reuse the gh token; commits need an identity (~/.gitconfig persists under /opt/data/home).
   agent_run gh auth setup-git || warn "gh auth setup-git failed — git push will prompt for credentials"
@@ -88,7 +89,7 @@ do_status() {
     echo; echo "── claude ──"; claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
-    echo; echo "── gh ──"; gh auth status 2>&1 || true
+    echo; echo "── gh (shared by all profiles) ──"; gh auth status 2>&1 || true
     echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
     echo; echo "── messaging ──"; hermes -p default gateway status 2>&1 | head -n 20 || true
 '

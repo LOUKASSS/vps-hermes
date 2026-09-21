@@ -1,0 +1,138 @@
+model:
+  default: gpt-5.6-sol
+  provider: openai-codex
+  base_url: https://chatgpt.com/backend-api/codex
+  api_mode: codex_responses
+  aliases:
+    astra: openai-codex/gpt-6-astra
+    sol: openai-codex/gpt-5.6-sol
+    terra: openai-codex/gpt-5.6-terra
+    luna: openai-codex/gpt-5.6-luna
+    grok: xai-oauth/grok-4.6
+plugins:
+  enabled: []
+_config_version: 45
+agent:
+  reasoning_effort: medium
+  max_turns: 40
+delegation:
+  model: gpt-5.6-terra
+  provider: openai-codex
+  reasoning_effort: low
+  max_iterations: 15
+  max_concurrent_children: 2
+  max_spawn_depth: 1
+  child_timeout_seconds: 180
+  subagent_auto_approve: false
+memory:
+  provider: honcho
+  memory_enabled: true
+  user_profile_enabled: true
+terminal:
+  cwd: /opt/data/profiles/seo/workspace
+  home_mode: profile
+approvals:
+  mode: manual
+security:
+  redact_secrets: true
+kanban:
+  dispatch_in_gateway: false
+  auto_decompose: false
+  orchestrator_profile: chief
+  default_assignee: chief
+  max_in_progress: 2
+  max_in_progress_per_profile: 1
+cron:
+  model: gpt-5.6-luna
+  model_provider: openai-codex
+  max_parallel_jobs: 1
+  allow_agent_scheduling: false
+curator:
+  consolidate: false
+toolsets:
+  - terminal
+  - file
+  - code_execution
+  - web
+  - browser
+  - skills
+  - memory
+  - session_search
+  - delegation
+  - kanban
+  - todo
+  - clarify
+platform_toolsets:
+  cli:
+    - terminal
+    - file
+    - code_execution
+    - web
+    - browser
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - kanban
+    - todo
+    - clarify
+  api_server:
+    - terminal
+    - file
+    - code_execution
+    - web
+    - browser
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - kanban
+    - todo
+    - clarify
+  telegram:
+    - terminal
+    - file
+    - code_execution
+    - web
+    - browser
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - kanban
+    - todo
+    - clarify
+  discord:
+    - terminal
+    - file
+    - code_execution
+    - web
+    - browser
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - kanban
+    - todo
+    - clarify
+  slack:
+    - terminal
+    - file
+    - code_execution
+    - web
+    - browser
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - kanban
+    - todo
+    - clarify
+secrets:
+  bitwarden:
+    enabled: true
+    project_id: c32ad2e8-7cae-492d-9c6a-b4ca012dae35
+    server_url: https://vault.bitwarden.eu
+discord:
+  require_mention: true
+  thread_require_mention: true

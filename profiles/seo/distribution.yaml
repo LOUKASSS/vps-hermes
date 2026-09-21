@@ -1,0 +1,12 @@
+name: seo
+version: 2026.09.19.1
+description: "SEO : audits, stratégie de contenu, SEO programmatique, schema, copywriting, AI SEO (coreyhaines31/marketingskills) + google-workspace et grounded-citations."
+hermes_requires: ">=0.21.3"
+# Paths `hermes profile install|update` replaces with the repo copies (config.yaml only on a fresh
+# install or `profiles.sh install --force-config`). Everything else in the live profile — memories,
+# sessions, auth.json, .env, skills and plugins added by hand — is never touched.
+distribution_owned: [SOUL.md, config.yaml, profile.yaml, .no-bundled-skills, mcp.json, skills, cron, distribution.yaml]
+env_requires:
+  - name: API_SERVER_KEY
+    description: Gateway API key for /p/seo/v1 (profiles.sh generates one when missing)
+    required: false

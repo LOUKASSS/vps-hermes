@@ -34,7 +34,9 @@ save_previous() {
     [ -n "$c" ] || continue
     ref="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null)" || continue
     id="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null)" || continue
-    docker tag "$id" "$(prev_tag "$ref")" && seen["$ref"]=1
+    # containerd image store: .Image is a config digest `docker tag` cannot resolve → the ref
+    # (what `compose up` would start again anyway) is the next best thing.
+    { docker tag "$id" "$(prev_tag "$ref")" 2>/dev/null || docker tag "$ref" "$(prev_tag "$ref")"; } && seen["$ref"]=1
   done < <(compose ps -aq)
   for img in $(image_refs); do
     [ -n "${seen[$img]:-}" ] && continue

@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "installed": {
+    "grilling": {
+      "source": "skills.sh",
+      "identifier": "skills-sh/mattpocock/skills/grilling",
+      "trust_level": "community",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:254949da70c9d7f8",
+      "install_path": "grilling",
+      "files": [
+        "SKILL.md",
+        "agents/openai.yaml"
+      ],
+      "metadata": {
+        "source_url": "https://github.com/mattpocock/skills/tree/c55ee46073ed923f86ce59a5eb3b6d895095d1b7/skills/productivity/grilling",
+        "source_revision": "c55ee46073ed923f86ce59a5eb3b6d895095d1b7",
+        "detail_url": "https://skills.sh/mattpocock/skills/grilling",
+        "repo_url": "https://github.com/mattpocock/skills"
+      },
+      "scan_provenance": {
+        "bundle_hash": "sha256:254949da70c9d7f8fb14b5492dbd8b4ddfff3d5edb8b36422c72e83237ced85d",
+        "scanner_version": "skills-guard-v5",
+        "source": "skills-sh/mattpocock/skills/grilling",
+        "source_url": "https://github.com/mattpocock/skills/tree/c55ee46073ed923f86ce59a5eb3b6d895095d1b7/skills/productivity/grilling",
+        "verdict": "safe",
+        "trust_level": "community",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:04:15.496984+00:00",
+        "summary": "grilling: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:04:15.532400+00:00",
+      "updated_at": "2026-09-19T13:04:15.532400+00:00"
+    },
+    "grill-me": {
+      "source": "official",
+      "identifier": "official/software-development/grill-me",
+      "trust_level": "builtin",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:cc1feeba5b6c6a2b",
+      "install_path": "software-development/grill-me",
+      "files": [
+        "SKILL.md"
+      ],
+      "metadata": {},
+      "scan_provenance": {
+        "bundle_hash": "sha256:cc1feeba5b6c6a2b18e1335b52d2ec2cfba1102eb571fe55079ce57b89ae5aaf",
+        "scanner_version": "skills-guard-v5",
+        "source": "official",
+        "source_url": "official/software-development/grill-me",
+        "verdict": "safe",
+        "trust_level": "builtin",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T13:04:18.523725+00:00",
+        "summary": "grill-me: clean scan, no threats detected",
+        "fresh": true
+      },
+      "installed_at": "2026-09-19T13:04:18.533798+00:00",
+      "updated_at": "2026-09-19T13:04:18.533798+00:00"
+    },
+    "one-three-one-rule": {
+      "source": "official",
+      "identifier": "official/communication/one-three-one-rule",
+      "trust_level": "builtin",
+      "scan_verdict": "safe",
+      "content_hash": "sha256:80f778d3807756ca",
+      "install_path": "communication/one-three-one-rule",
+      "files": [
+        "SKILL.md"
+      ],
+      "metadata": {},
+      "scan_provenance": {
+        "bundle_hash": "sha256:80f778d3807756caca8106516087ddcb6a71ec7d5be63d5622bf1d9f9b9626c2",
+        "scanner_version": "skills-guard-v5",
+        "source": "official",
+        "source_url": "official/communication/one-three-one-rule",
+        "verdict": "safe",
+        "trust_level": "builtin",
+        "findings": [],
+        "rules": [],
+        "scanned_at": "2026-09-19T14:38:59.686881+00:00",
+        "summary": "one-three-one-rule: clean scan, no threats detected",
+        "fresh": false
+      },
+      "installed_at": "2026-09-19T14:57:07.209982+00:00",
+      "updated_at": "2026-09-19T14:57:07.209982+00:00"
+    }
+  }
+}

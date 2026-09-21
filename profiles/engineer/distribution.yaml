@@ -1,0 +1,12 @@
+name: engineer
+version: 2026.09.19.1
+description: "Engineering multi-repositories : Astro, TypeScript, Cloudflare, APIs, tests et migrations WordPress. Superpowers (plugin, plugins.txt) est la méthodologie de dev ; Matt Pocock (grilling, domain-modeling, grill-with-docs, codebase-design, improve-codebase-architecture, wayfinder, wizard), Cloudflare (cloudflare, wrangler, workers-best-practices) et web-design-guidelines (audits UX/UI/a11y, sans déploiement Vercel)."
+hermes_requires: ">=0.21.3"
+# Paths `hermes profile install|update` replaces with the repo copies (config.yaml only on a fresh
+# install or `profiles.sh install --force-config`). Everything else in the live profile — memories,
+# sessions, auth.json, .env, skills and plugins added by hand — is never touched.
+distribution_owned: [SOUL.md, config.yaml, profile.yaml, .no-bundled-skills, mcp.json, skills, cron, distribution.yaml]
+env_requires:
+  - name: API_SERVER_KEY
+    description: Gateway API key for /p/engineer/v1 (profiles.sh generates one when missing)
+    required: false
