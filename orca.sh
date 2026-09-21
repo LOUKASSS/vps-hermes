@@ -33,7 +33,9 @@ load_env
 : "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}" "${ORCA_HOME:=/srv/hermes/orca}"
 
 ORCA_USER=hermes
-# Follows .env (lib/common.sh fallback stays /srv/hermes/workspace until migrate).
+# Follows .env. lib/common.sh fallback stays /srv/hermes/workspace until migrate, so this
+# :-projects default is dead after load_env. PR8 must set_env HERMES_WORKSPACE_DIR
+# /srv/hermes/projects before write_service so WorkingDirectory is not workspace.
 ORCA_WORKDIR="${HERMES_WORKSPACE_DIR:-/srv/hermes/projects}"
 ORCA_HOOKS="$ORCA_HOME/git-hooks"
 ORCA_ROOT=/opt/orca
@@ -46,8 +48,8 @@ TMP_DIR=""; trap 'rm -rf "$TMP_DIR"' EXIT
 installed_version() { cat "$ORCA_ROOT/current/VERSION" 2>/dev/null || true; }
 
 # GIT_CONFIG_* = git -c rank (beats repo-local core.hooksPath on git 2.43). Empty fsmonitor /
-# editor / sshCommand / gpg.program neutralize hook-adjacent settings. Must be in orca.env (the
-# unit) AND passed through env -i (as_hermes), or they vanish.
+# editor / sshCommand / gpg.program neutralize hook-adjacent settings. Same block is written to
+# orca.env (the unit) and passed into env -i (as_hermes), or they vanish.
 git_config_defaults() {
   cat <<EOF
 GIT_CONFIG_GLOBAL=$ORCA_HOME/.gitconfig
@@ -65,34 +67,6 @@ GIT_CONFIG_VALUE_4=ssh
 GIT_CONFIG_KEY_5=gpg.program
 GIT_CONFIG_VALUE_5=gpg
 EOF
-}
-
-# Fill array named $1 with GIT_CONFIG_* from /etc/orca.env (set -a pass-through) or the defaults.
-load_git_config_env() {
-  local -n _git_cfg="$1"
-  local k line
-  _git_cfg=()
-  if [ -f "$ORCA_ENV" ]; then
-    # Subshell: sourcing would otherwise clobber HOME in this (root) process.
-    while IFS= read -r line; do
-      [ -n "$line" ] && _git_cfg+=("$line")
-    done < <(
-      # Drop inherited GIT_CONFIG_* so a stale parent env cannot leak into env -i.
-      for k in "${!GIT_CONFIG_@}"; do unset "$k"; done
-      set -a
-      # shellcheck disable=SC1090
-      . "$ORCA_ENV"
-      set +a
-      for k in "${!GIT_CONFIG_@}"; do
-        printf '%s=%s\n' "$k" "${!k}"
-      done
-    )
-  fi
-  if [ "${#_git_cfg[@]}" -eq 0 ]; then
-    while IFS= read -r line; do
-      [ -n "$line" ] && _git_cfg+=("$line")
-    done < <(git_config_defaults)
-  fi
 }
 
 # ── user ─────────────────────────────────────────────────────────────────
@@ -138,17 +112,10 @@ sync_creds() {
 # Run a command as hermes with a clean environment. env -i drops GIT_CONFIG_* unless we pass them.
 as_hermes() {
   local -a git_cfg=()
-  load_git_config_env git_cfg
+  mapfile -t git_cfg < <(git_config_defaults)
   runuser -u "$ORCA_USER" -- env -i HOME="$ORCA_HOME" USER="$ORCA_USER" LOGNAME="$ORCA_USER" \
     PATH=/usr/local/bin:/usr/bin:/bin TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" \
     "${git_cfg[@]}" "$@"
-}
-
-# POSIX ACLs for a dedicated orca user are gone (same uid as the stack). Command kept so callers
-# of `orca.sh share` do not break.
-share_stack() {
-  info "No dedicated orca user — $STACK_DIR is already $ORCA_USER:$ORCA_USER (no POSIX ACLs)."
-  ensure_gitconfig
 }
 
 # ── host dependencies ────────────────────────────────────────────────────
@@ -158,7 +125,7 @@ apt_pick() { local n; for n in "$@"; do apt-cache show "$n" >/dev/null 2>&1 && {
 install_deps() {
   info "Installing Xvfb + Electron headless libraries…"
   apt-get update -q
-  local pkgs=(xvfb file zlib1g acl curl ca-certificates git libnss3 libgbm1 libxtst6 libdrm2 libxkbcommon0
+  local pkgs=(xvfb file zlib1g curl ca-certificates git libnss3 libgbm1 libxtst6 libdrm2 libxkbcommon0
     libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxrender1 libx11-xcb1 libxcb-dri3-0 libxss1)
   local p
   for p in "libgtk-3-0t64 libgtk-3-0" "libatk1.0-0t64 libatk1.0-0" "libatk-bridge2.0-0t64 libatk-bridge2.0-0" \
@@ -238,12 +205,20 @@ activate() {
 }
 
 # ── service ──────────────────────────────────────────────────────────────
+# systemd User= of the installed unit (empty if not installed).
+unit_user() { systemctl show orca -p User --value 2>/dev/null || true; }
+
 # Writes the unit + EnvironmentFile + daemon-reload only. Stop/restart of a live orca
-# (uid 999 → hermes) is migrate, not this function.
+# (uid 999 → hermes) is migrate, not this function. Callers that would restart (update/pair)
+# must skip when unit_user is still orca. PR8: set_env HERMES_WORKSPACE_DIR /srv/hermes/projects
+# and create that dir before write_service.
 write_service() {
   case "${DESKTOP_BIND:-}" in
     ""|0.0.0.0|"::"|127.0.0.1) warn "DESKTOP_BIND=${DESKTOP_BIND:-unset}: Orca will advertise that address to its clients. Set it to the Tailscale IP (install.sh does when Tailscale is up)." ;;
   esac
+  [ -d "$ORCA_WORKDIR" ] || die "WorkingDirectory $ORCA_WORKDIR does not exist (PR8 must set_env HERMES_WORKSPACE_DIR /srv/hermes/projects and create it before write_service)"
+  install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME"
+  install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOOKS"
   cat > "$ORCA_ENV" <<EOF
 # Generated by orca.sh from $STACK_DIR/.env — re-run \`orca.sh pair\` / \`orca.sh update --force\` after editing .env.
 HOME=$ORCA_HOME
@@ -316,7 +291,6 @@ do_install() {
   fetch_release "${ORCA_VERSION:-latest}"
   activate "$FETCHED_TAG"
   sync_creds
-  share_stack
   write_service
   systemctl enable -q orca
   if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -336,7 +310,6 @@ do_update() {
   fi
   [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
   install_clis
-  share_stack
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -345,6 +318,12 @@ do_update() {
     return 0
   fi
   activate "$FETCHED_TAG"
+  # Do not rewrite User=hermes or restart while the live unit is still orca: HOME is 0700
+  # orca:orca until migrate step 10 (stop, wait, chown, write_service).
+  if [ "$(unit_user)" = orca ]; then
+    warn "orca.service is still User=orca — migrate owns the User=hermes switch; not rewriting the unit or restarting. New release is activated at $ORCA_ROOT/current."
+    return 0
+  fi
   write_service
   restart_and_pair
 }
@@ -363,6 +342,10 @@ do_pair() {
   local pairing
   case "${1:-desktop}" in desktop) pairing="" ;; mobile) pairing="--mobile-pairing" ;; *) die "usage: $0 pair [desktop|mobile]" ;; esac
   set_env ORCA_PAIRING "$pairing"; export ORCA_PAIRING="$pairing"
+  if [ "$(unit_user)" = orca ]; then
+    warn "orca.service is still User=orca — migrate owns the User=hermes switch; not rewriting the unit or restarting. Re-run sudo $0 pair ${1:-desktop} after migrate."
+    return 0
+  fi
   write_service
   restart_and_pair
 }
@@ -407,7 +390,7 @@ case "${1:-}" in
   rollback) do_rollback ;;
   pair)     do_pair "${2:-desktop}" ;;
   creds)    id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"; sync_creds ;;
-  share)    id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"; share_stack ;;
+  share)    info "No dedicated orca user — $STACK_DIR needs no POSIX ACLs." ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
