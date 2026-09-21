@@ -7,6 +7,10 @@
 #   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
 #   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
 #
+# Do not checkout this compose on the live VPS before migrate-single-agent.sh has
+# removed data/active_profile. `hermes gateway run` without -p default follows the
+# sticky named profile and steals :8642; update.sh refuses while that file exists.
+#
 # Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
 #   traefik ──proxy──▶ hermes-agent ─ :9120 dashboard (basic auth) = https://HERMES_HOST, also
 #      │                             │       published raw on DESKTOP_BIND:9120 for Hermes Desktop
@@ -262,7 +266,14 @@ services:
     tmpfs: [/etc/dnsmasq.d, /run]   # empty conf-dir + pid file
     networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
+      # Harmless on 4km3; kept so a first-cutover rollback that still hits the custom
+      # hermes-dns entrypoint.sh (if entrypoint pin is lost) has DNS_ZONE/DNS_IP.
+      DNS_ZONE: ${DNS_ZONE:-${HERMES_HOST}}
+      DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
       TZ: ${TZ:-UTC}
+    # Pin so a rollback retag of hermes-dns:latest as 4km3/dnsmasq still applies
+    # command flags (custom image ENTRYPOINT is /entrypoint.sh, which needs env).
+    entrypoint: ["/usr/sbin/dnsmasq", "--keep-in-foreground"]
     command:
       - --conf-file=/etc/dnsmasq.conf
       - --log-facility=-

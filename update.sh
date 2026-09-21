@@ -118,6 +118,13 @@ do_rollback() {
 }
 
 do_update() {
+  # This compose must not land on the live checkout before migrate-single-agent.sh
+  # has removed data/active_profile. Recreating hermes-agent with `hermes gateway run`
+  # while the sticky named profile is set steals 127.0.0.1:8642; /health stays 200
+  # so wait_healthy would not roll back. --force does not bypass this.
+  if [ -e "${HERMES_DATA_DIR}/active_profile" ]; then
+    die "refusing update: ${HERMES_DATA_DIR}/active_profile exists — run migrate-single-agent.sh first (this compose must not recreate hermes-agent until the sticky profile is gone)"
+  fi
   if [ -e "$UPDATE_HOLD" ] && [ "${1:-}" != --force ]; then
     warn "updates on hold since $(cat "$UPDATE_HOLD") (after a rollback). Lift with: sudo $0 resume — or: sudo $0 --force"
     exit 0
