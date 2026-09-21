@@ -24,7 +24,7 @@ Read the user's Hevy training log. **Official API**, Hevy **Pro** key required.
 - Package `hevy-mcp` **6.1.13** (chrisdoc/hevy-mcp), installed once with npm at
   `/opt/data/mcp/node/` (host: `/srv/hermes/data/mcp/node/`)
 - Server `hevy` = `node …/node_modules/hevy-mcp/dist/cli.mjs`, all 22 tools enabled. 2026-09-19.
-- Secret: BWS `HEVY_API_KEY` → `${env:HEVY_API_KEY}` (Bitwarden Secrets Manager, EU vault)
+- Secret: `HEVY_API_KEY` as a name in `/opt/data/.env` → `${env:HEVY_API_KEY}`. Never print the value.
 - Key from https://hevy.com/settings?developer
 - Do not `npx -y hevy-mcp` (re-downloads at each start) and do not write a local env file.
 
@@ -45,7 +45,7 @@ Start with `get-training-summary` for "how is training going", `get-workouts` pa
 hermes mcp test hevy
 ```
 
-If 401: fix `HEVY_API_KEY` in BWS, then reload MCP.
+If 401: the name `HEVY_API_KEY` must be present in `/opt/data/.env` (do not print the value), then reload MCP. Do not run `hermes secrets bitwarden sync` on the default home.
 
 ## Pitfalls
 

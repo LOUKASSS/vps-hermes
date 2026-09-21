@@ -25,7 +25,7 @@ Read and log the user's Yazio diary from Hermes. **No official API.**
 - Pinned **yazio-mcp 0.0.14** (fliptheweb/yazio-mcp), installed once with npm at
   `/opt/data/mcp/node/` (host: `/srv/hermes/data/mcp/node/`)
 - Server `yazio` = `node …/node_modules/yazio-mcp/dist/index.js`, all 15 tools enabled. 2026-09-19.
-- Secrets: **BWS only** (`YAZIO_USERNAME`, `YAZIO_PASSWORD`). Hermes interpolates `${env:YAZIO_USERNAME}` / `${env:YAZIO_PASSWORD}` into the MCP env. No live env file.
+- Secrets: `YAZIO_USERNAME` / `YAZIO_PASSWORD` as names in `/opt/data/.env`. Hermes interpolates `${env:YAZIO_USERNAME}` / `${env:YAZIO_PASSWORD}` into the MCP env. Never print values.
 - **Do not** `npx -y yazio-mcp` and do not auto-update — re-audit any new version
 
 ## Auth
@@ -49,7 +49,7 @@ Dates: MCP `add_user_consumed_item` takes `YYYY-MM-DD` only. The API stores `00:
 hermes mcp test yazio
 ```
 
-If auth fails: `hermes secrets bitwarden sync` must list `YAZIO_USERNAME` / `YAZIO_PASSWORD`, then reload MCP. Do not recreate a plaintext env file.
+If auth fails: the names `YAZIO_USERNAME` and `YAZIO_PASSWORD` must be present in `/opt/data/.env` (do not print values), then reload MCP. Do not run `hermes secrets bitwarden sync` on the default home.
 
 ## Pitfalls
 

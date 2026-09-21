@@ -24,7 +24,7 @@ Read the user's Renpho Health **scale** from Hermes. No official API.
 - Local build of `renpho-mcp-server` **1.2.0** (Node, restored from the old machine) at
   `/opt/data/mcp/renpho-mcp-server/` (host: `/srv/hermes/data/mcp/renpho-mcp-server/`)
 - Server `renpho` = `node …/renpho-mcp-server/dist/index.js`, all 9 tools enabled. 2026-09-19.
-- Secrets: **BWS only** `RENPHO_EMAIL` / `RENPHO_PASSWORD` → `${env:RENPHO_EMAIL}` / `${env:RENPHO_PASSWORD}`
+- Secrets: `RENPHO_EMAIL` / `RENPHO_PASSWORD` as names in `/opt/data/.env` → `${env:RENPHO_EMAIL}` / `${env:RENPHO_PASSWORD}`. Never print values.
 - Needs **Renpho Health** (app bleue) + email/password
 - Do not write a local env file; do not auto-update
 
@@ -43,7 +43,7 @@ No write/upload tools. No tape / girth tools in this server.
 hermes mcp test renpho
 ```
 
-If auth fails: BWS must list `RENPHO_EMAIL` / `RENPHO_PASSWORD`, then reload MCP.
+If auth fails: the names `RENPHO_EMAIL` and `RENPHO_PASSWORD` must be present in `/opt/data/.env` (do not print values), then reload MCP. Do not run `hermes secrets bitwarden sync` on the default home.
 
 ## Pitfalls
 
