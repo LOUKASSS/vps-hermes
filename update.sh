@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update the stack: rebuild the derived images on the newest base, pull the other images, recreate.
+# Update the stack: rebuild the agent image and its coding CLIs, pull public images, recreate.
 # Keeps the previous images under a `:previous` tag and rolls back to them automatically when
 # hermes-agent does not come back healthy.
 #
@@ -22,7 +22,53 @@ image_refs() {
   local refs; refs="$(compose config --images)" || die "docker compose config failed (bad .env?)"
   { printf '%s\n' "$refs"; echo "$RESTIC_IMAGE"; } | sort -u
 }
+# Suffix the shortest :* so 4km3/dnsmasq:2.90-r3 → 4km3/dnsmasq:previous and
+# node:22-bookworm-slim → node:previous. node:22-bookworm-slim:previous is not a
+# valid Docker ref (invalid reference format).
 prev_tag() { echo "${1%:*}:previous"; }
+
+# First cut-over only: custom hermes-dns / obsidian-sync images must be reachable
+# as the public images' :previous tags so do_rollback can retag
+# 4km3/dnsmasq:previous → 4km3/dnsmasq:2.90-r3 (and node:previous → node:22-bookworm-slim)
+# without a compose override. Later weeks: the running container already uses the
+# public ref and save_previous tagged it; do not clobber that with the stale custom image.
+map_cutover_previous() {
+  local running
+  running="$(docker inspect -f '{{.Config.Image}}' hermes-dns 2>/dev/null || true)"
+  case "$running" in
+    4km3/dnsmasq:*) ;;  # already on the public image; save_previous owns :previous
+    hermes-dns:*)
+      if docker image inspect hermes-dns:latest >/dev/null 2>&1; then
+        docker tag hermes-dns:latest hermes-dns:previous
+        docker tag hermes-dns:latest 4km3/dnsmasq:previous
+      fi
+      ;;
+    "")
+      if docker image inspect hermes-dns:latest >/dev/null 2>&1; then
+        docker tag hermes-dns:latest hermes-dns:previous
+        docker image inspect 4km3/dnsmasq:previous >/dev/null 2>&1 || \
+          docker tag hermes-dns:latest 4km3/dnsmasq:previous
+      fi
+      ;;
+  esac
+  running="$(docker inspect -f '{{.Config.Image}}' obsidian-sync 2>/dev/null || true)"
+  case "$running" in
+    node:*) ;;
+    obsidian-sync:*)
+      if docker image inspect obsidian-sync:latest >/dev/null 2>&1; then
+        docker tag obsidian-sync:latest obsidian-sync:previous
+        docker tag obsidian-sync:latest node:previous
+      fi
+      ;;
+    "")
+      if docker image inspect obsidian-sync:latest >/dev/null 2>&1; then
+        docker tag obsidian-sync:latest obsidian-sync:previous
+        docker image inspect node:previous >/dev/null 2>&1 || \
+          docker tag obsidian-sync:latest node:previous
+      fi
+      ;;
+  esac
+}
 
 # Tag as :previous the image each container is actually RUNNING (docker inspect .Image), not
 # whatever :latest resolves to now — a pull that failed half-way must not become the rollback
@@ -46,9 +92,19 @@ save_previous() {
 }
 
 do_rollback() {
-  local img prev n=0
+  local img prev n=0 fallback
   for img in $(image_refs); do
     prev="$(prev_tag "$img")"
+    if ! docker image inspect "$prev" >/dev/null 2>&1; then
+      fallback=""
+      case "$img" in
+        4km3/dnsmasq:*) fallback=hermes-dns:previous ;;
+        node:22-bookworm-slim) fallback=obsidian-sync:previous ;;
+      esac
+      if [ -n "$fallback" ] && docker image inspect "$fallback" >/dev/null 2>&1; then
+        docker tag "$fallback" "$prev"
+      fi
+    fi
     docker image inspect "$prev" >/dev/null 2>&1 || { warn "no previous image for $img"; continue; }
     docker tag "$prev" "$img"; n=$((n + 1))
   done
@@ -62,6 +118,13 @@ do_rollback() {
 }
 
 do_update() {
+  # This compose must not land on the live checkout before migrate-single-agent.sh
+  # has removed data/active_profile. Recreating hermes-agent with `hermes gateway run`
+  # while the sticky named profile is set steals 127.0.0.1:8642; /health stays 200
+  # so wait_healthy would not roll back. --force does not bypass this.
+  if [ -e "${HERMES_DATA_DIR}/active_profile" ]; then
+    die "refusing update: ${HERMES_DATA_DIR}/active_profile exists — run migrate-single-agent.sh first (this compose must not recreate hermes-agent until the sticky profile is gone)"
+  fi
   if [ -e "$UPDATE_HOLD" ] && [ "${1:-}" != --force ]; then
     warn "updates on hold since $(cat "$UPDATE_HOLD") (after a rollback). Lift with: sudo $0 resume — or: sudo $0 --force"
     exit 0
@@ -70,11 +133,12 @@ do_update() {
   lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
   info "Keeping the current images as :previous"
   save_previous
-  # --no-cache: the npm/apk/apt layers must re-run even when the base image digest did not move,
-  # otherwise the CLIs and dnsmasq only advance when the base happens to change.
-  info "Rebuilding derived images on the latest bases…"
-  compose build --pull --no-cache
-  info "Pulling the other images…"
+  map_cutover_previous
+  # Re-run the npm layer even if the base image digest is unchanged, so unpinned coding CLIs
+  # advance on every scheduled update.
+  info "Building agent image with the latest coding CLIs…"
+  compose build --pull --no-cache hermes-agent
+  info "Pulling public images (traefik, postgres, dns, obsidian, proxy, restic)…"
   compose pull --ignore-buildable
   docker pull -q "$RESTIC_IMAGE" >/dev/null
   info "Recreating containers…"
@@ -96,6 +160,10 @@ do_update() {
   # Orca lives on the host (orca.sh); it has its own previous/rollback, independent of the images.
   if [ -e /opt/orca/current ]; then
     "$STACK_DIR/orca.sh" update || warn "Orca update failed (stack update is fine): sudo $STACK_DIR/orca.sh update"
+  fi
+  # herdr (host, operator user): new binary + tode; the running server keeps its panes (no restart).
+  if [ -e /etc/systemd/system/herdr.service ]; then
+    "$STACK_DIR/herdr.sh" update || warn "herdr update failed (stack update is fine): sudo $STACK_DIR/herdr.sh update"
   fi
 }
 

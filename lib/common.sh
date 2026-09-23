@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
-# Shared helpers for install.sh / auth.sh / update.sh / backup.sh. Source, do not execute.
+# Shared helpers for the command-center scripts (install.sh, auth.sh, update.sh, backup.sh,
+# orca.sh, helios.sh, herdr.sh, command-center). Source, do not execute.
+#
+# /srv layout (one folder per project, one shared workspace):
+#   /srv/command-center   this repo: scripts, compose, .env, state/traefik (STACK_DIR)
+#   /srv/hermes           Hermes agent: data/ (/opt/data), obsidian/, postgres/
+#   /srv/orca             Orca HOME (orca.service)
+#   /srv/helios           Helios deployment: .env, tinyauth/ (code: WORKSPACE/projects/helios)
+#   /srv/workspace        shared projects — same absolute path on the host and in hermes-agent
 
-STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Physical path (-P): scripts reached through a compat symlink must still resolve to the real
+# checkout, or compose would derive another project name / relative paths from the link.
+STACK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SRV_ROOT="${SRV_ROOT:-/srv}"
 
 if [ -t 1 ]; then
   _c_info=$'\033[1;34m'; _c_warn=$'\033[1;33m'; _c_err=$'\033[1;31m'; _c_off=$'\033[0m'
@@ -43,9 +54,13 @@ load_env() {
   # shellcheck disable=SC1091
   . "$STACK_DIR/.env"
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
-  : "${HERMES_DATA_DIR:=/srv/hermes/data}" "${HERMES_WORKSPACE_DIR:=/srv/hermes/workspace}" "${TRAEFIK_DIR:=/srv/hermes/traefik}"
-  : "${OBSIDIAN_DIR:=/srv/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=/srv/hermes/orca}"
-  : "${POSTGRES_DIR:=/srv/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
+  # Defaults = the /srv layout above (migrate-srv-layout.sh writes them into a live .env).
+  : "${HERMES_DATA_DIR:=$SRV_ROOT/hermes/data}" "${HERMES_WORKSPACE_DIR:=$SRV_ROOT/workspace}" "${TRAEFIK_DIR:=$STACK_DIR/state/traefik}"
+  : "${OBSIDIAN_DIR:=$SRV_ROOT/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=$SRV_ROOT/orca}"
+  : "${POSTGRES_DIR:=$SRV_ROOT/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
+  : "${HELIOS_DIR:=$SRV_ROOT/helios}" "${HELIOS_SRC:=$HERMES_WORKSPACE_DIR/projects/helios}"
+  : "${OP_USER:=hermes}" "${OP_HOME:=$(getent passwd "${OP_USER}" 2>/dev/null | cut -d: -f6)}"
+  : "${OP_HOME:=/home/$OP_USER}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
   [ -n "${RESTIC_REPOSITORY:-}" ] || RESTIC_REPOSITORY="b2:${B2_BUCKET:-}:hermes"
   export RESTIC_REPOSITORY RESTIC_IMAGE RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" B2_ACCOUNT_ID="${B2_ACCOUNT_ID:-}" B2_ACCOUNT_KEY="${B2_ACCOUNT_KEY:-}"
@@ -142,14 +157,45 @@ enable_profile() {
 # Interactive command inside the agent container, as the runtime user, with HOME set
 # to the tool-subprocess home so CLI credentials land where the agent's own tool calls
 # will find them (/opt/data/home/.claude, .codex, .grok, .config/gh).
+# cwd = the workspace, mounted at the same absolute path as on the host (plus /workspace alias).
 agent_exec() {
-  compose exec -it -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w /workspace hermes-agent "$@"
+  compose exec -it -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent "$@"
 }
 
 # Same, non-interactive (for scripts).
 agent_run() {
-  compose exec -T -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w /workspace hermes-agent "$@"
+  compose exec -T -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent "$@"
 }
+
+# ensure_workspace — the shared project tree every tool works in (host: SSH / herdr / Orca;
+# container: hermes-agent, same absolute path). Owned by HERMES_UID (= the operator user `hermes`
+# and the agent's runtime uid), so both sides read and write it without ACLs. /workspace on the
+# host is a symlink to it: paths written by the agent through its historical /workspace mount
+# (git worktrees, kanban, handoffs) resolve on the host as well.
+ensure_workspace() {
+  local w="$HERMES_WORKSPACE_DIR" d
+  no_symlink "$w"
+  install -d -m 0755 -o "$HERMES_UID" -g "$HERMES_GID" "$w"
+  for d in projects worktrees scratch db db/migrations; do
+    [ -e "$w/$d" ] || install -d -m 0755 -o "$HERMES_UID" -g "$HERMES_GID" "$w/$d"
+  done
+  if [ -L /workspace ]; then
+    [ "$(readlink /workspace)" = "$w" ] || ln -sfn "$w" /workspace
+  elif [ ! -e /workspace ]; then
+    ln -s "$w" /workspace
+  else
+    warn "/workspace exists on the host and is not a symlink — left alone (expected: symlink → $w)"
+  fi
+}
+
+# as_op <cmd…> — run as the operator user (hermes) with its login HOME (herdr, helios deploy).
+# HOME can be overridden: as_op_home <home> <cmd…>.
+as_op_home() {
+  local home="$1"; shift
+  runuser -u "$OP_USER" -- env -i HOME="$home" USER="$OP_USER" LOGNAME="$OP_USER" SHELL=/bin/bash \
+    PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" "$@"
+}
+as_op() { as_op_home "$OP_HOME" "$@"; }
 
 # One-off command in the Obsidian sync image (same HOME volume as the sidecar), interactive.
 obsidian_exec() {
@@ -160,12 +206,13 @@ obsidian_exec() {
 # path inside the container so snapshot paths match the host. RESTIC_* / B2_* come from .env.
 #   restic_run [--rw <hostdir>] <restic args…>     (--rw mounts <hostdir> at /restore, writable)
 restic_run() {
-  local tty=() rw=() orca=()
+  local tty=() rw=() orca=() helios=()
   # -t only when stdout is a terminal too: under a pty docker merges restic's stderr into
   # stdout, so a caller capturing stderr ($(… 2>&1 >/dev/null)) would get nothing.
   [ -t 0 ] && [ -t 1 ] && tty=(-it)
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
   [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
+  [ -d "$HELIOS_DIR" ] && helios=(-v "$HELIOS_DIR:$HELIOS_DIR:ro")   # Helios .env + tinyauth state
   docker run --rm "${tty[@]}" "${rw[@]}" --name "hermes-restic-$$" --hostname hermes-vps \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e B2_ACCOUNT_ID -e B2_ACCOUNT_KEY \
     -e RESTIC_CACHE_DIR=/cache -e TZ="${TZ:-UTC}" \
@@ -175,7 +222,7 @@ restic_run() {
     -v "$TRAEFIK_DIR:$TRAEFIK_DIR:ro" \
     -v "$OBSIDIAN_DIR:$OBSIDIAN_DIR:ro" \
     -v "$POSTGRES_DIR/dumps:$POSTGRES_DIR/dumps:ro" \
-    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" \
+    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" "${helios[@]}" \
     "$RESTIC_IMAGE" "$@"
 }
 

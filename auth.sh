@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Interactive OAuth logins for the Hermes stack. Runs commands inside the running
+# Interactive OAuth logins for the Hermes stack. Commands run inside the running
 # hermes-agent container as the runtime user with HOME=/opt/data/home, so tokens
-# persist on the host under $HERMES_DATA_DIR/home. GitHub is shared by every profile
-# through the container-wide GH_CONFIG_DIR and GIT_CONFIG_GLOBAL settings.
+# persist on the host under $HERMES_DATA_DIR/home. GitHub is shared through the
+# container-wide GH_CONFIG_DIR and GIT_CONFIG_GLOBAL settings.
 #
 #   sudo ./auth.sh                 # menu
 #   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell | chat
@@ -12,7 +12,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-# Everything but obsidian runs inside the agent container.
+# Everything but obsidian/status runs inside the agent container.
 case "${1:-}" in 8|obsidian|9|status) ;; *)
   running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
   [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
@@ -21,16 +21,27 @@ esac
 do_hermes() {
   info "Hermes model provider — pick 'Anthropic' (Claude Max OAuth), 'ChatGPT or Codex Subscription', or 'xAI Grok OAuth (SuperGrok / Premium+)'."
   info "Device-code / paste-code flows: open the printed URL on your laptop, paste the code back here."
-  agent_exec hermes -p default model
+  agent_exec hermes model
 }
 
 do_claude() {
+  local envf
   info "Claude Code login with your Claude subscription. Open the printed URL on your laptop, paste the code back."
-  info "Credentials land in /opt/data/home/.claude/.credentials.json — Hermes' anthropic provider reuses them (refreshable)."
-  agent_exec claude auth login
+  info "Credentials land in /opt/data/home/.claude/.credentials.json."
+  agent_exec env CLAUDE_CONFIG_DIR=/opt/data/home/.claude claude auth login
+  envf="$HERMES_DATA_DIR/.env"
+  no_symlink "$envf"
+  touch "$envf"; chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
+  # The two Claude auth paths are alternatives. A setup-token takes precedence over the
+  # credential file, so leaving an old one here makes a successful browser login still fail.
+  sed -i '/^CLAUDE_CODE_OAUTH_TOKEN=/d' "$envf"
+  set_env CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR /opt/data/home/.claude "$envf"
+  chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
+  info "Claude subscription login selected for Hermes. Restart hermes-agent to apply it."
 }
 
 do_claude_token() {
+  local envf tok
   info "Alternative: long-lived token via 'claude setup-token' (Claude Max). Open the URL on your laptop, approve, paste the code back."
   agent_exec claude setup-token
   echo
@@ -39,13 +50,16 @@ do_claude_token() {
     envf="$HERMES_DATA_DIR/.env"
     no_symlink "$envf"
     touch "$envf"; chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
+    # setup-token is an alternative to the CLI credential directory, not an overlay on it.
+    sed -i '/^CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/d' "$envf"
     set_env CLAUDE_CODE_OAUTH_TOKEN "$tok" "$envf"
+    chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
     info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent"
   fi
 }
 
 do_codex() {
-  info "Codex CLI device-code login (ChatGPT Plus/Pro/Team). Hermes imports ~/.codex/auth.json automatically."
+  info "Codex CLI device-code login (ChatGPT Plus/Pro/Team)."
   agent_exec codex login --device-auth
 }
 
@@ -55,7 +69,7 @@ do_grok() {
 }
 
 do_gh() {
-  info "GitHub CLI login (device flow; shared by every Hermes profile)."
+  info "GitHub CLI login (device flow; container gh — Orca has its own: sudo $STACK_DIR/orca.sh login gh)."
   agent_exec gh auth login --web --git-protocol https
   # git pushes over https reuse the gh token; commits need an identity (~/.gitconfig persists under /opt/data/home).
   agent_run gh auth setup-git || warn "gh auth setup-git failed — git push will prompt for credentials"
@@ -72,7 +86,7 @@ do_gh() {
 do_messaging() {
   info "Messaging platforms (Telegram, Discord, Slack, WhatsApp, …). Interactive wizard; tokens land in /opt/data/.env."
   info "Bots use outbound polling/websockets — nothing to open in the firewall."
-  agent_exec hermes -p default gateway setup
+  agent_exec hermes gateway setup
   echo
   read -r -p "Recreate the gateway now to apply the new platforms? [Y/n] " a
   case "${a:-y}" in
@@ -86,12 +100,12 @@ do_status() {
     echo "── hermes-agent is NOT running (logins not shown): docker compose ps ──"
   else agent_run sh -c '
     echo "── hermes providers ──"; hermes auth list 2>&1 || true; hermes config get model 2>&1 || true
-    echo; echo "── claude ──"; claude auth status --text 2>&1 || echo "not logged in"
+    echo; echo "── claude ──"; CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
-    echo; echo "── gh (shared by all profiles) ──"; gh auth status 2>&1 || true
+    echo; echo "── gh ──"; gh auth status 2>&1 || true
     echo "git identity: $(git config --global user.name 2>/dev/null || echo unset) <$(git config --global user.email 2>/dev/null || echo unset)>"
-    echo; echo "── messaging ──"; hermes -p default gateway status 2>&1 | head -n 20 || true
+    echo; echo "── messaging ──"; hermes gateway status 2>&1 | head -n 20 || true
 '
   fi
   echo; echo "── updates ──"
@@ -124,10 +138,17 @@ do_status() {
   echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$HERMES_HOST} + *.${DNS_ZONE:-$HERMES_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
-    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  user orca, HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"
+    _orca_user="$(systemctl show orca -p User --value 2>/dev/null || true)"
+    echo "orca.service: $(systemctl is-active orca 2>/dev/null)  version $(cat /opt/orca/current/VERSION 2>/dev/null || echo ?)  → ${DESKTOP_BIND:-?}:${ORCA_PORT:-6768}  ${_orca_user:+user $_orca_user, }HOME $ORCA_HOME  (details: $STACK_DIR/orca.sh status)"
   else
     echo "not installed (run: sudo $STACK_DIR/orca.sh install)"
   fi
+  echo "Orca coding CLI logins (separate HOME): sudo $STACK_DIR/orca.sh login claude|codex|grok"
+  local f
+  for f in .claude/.credentials.json .codex/auth.json .grok/auth.json; do
+    if [ -f "$ORCA_HOME/$f" ]; then echo "  $f: present"
+    else echo "  $f: missing"; fi
+  done
   echo; echo "── obsidian ──"
   if [[ ",${COMPOSE_PROFILES:-}," == *,obsidian,* ]]; then
     docker inspect -f 'sidecar: {{.State.Status}}' obsidian-sync 2>/dev/null || echo "sidecar: not created"
@@ -143,7 +164,11 @@ do_obsidian() {
   mkdir -p "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
   no_symlink "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
   chown "$HERMES_UID:$HERMES_GID" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
-  compose --profile obsidian build --pull obsidian-sync
+  # Pull (node:22-bookworm-slim after the image cut-over). Today's obsidian-sync:latest is
+  # local-only, so a failed pull is OK when the image is already on the host.
+  compose --profile obsidian pull obsidian-sync || warn "pull failed; continuing with the local obsidian-sync image"
+  # First compose-run before `up -d`: today's ENTRYPOINT is `ob` (extra args = `ob <args>`);
+  # after the cut-over the bind-mounted entrypoint installs `ob` into the volume, then execs it.
   obsidian_exec login
   echo
   info "Remote vaults:"; obsidian_exec sync-list-remote || true
@@ -180,10 +205,17 @@ is_target() {
 }
 run_target() {
   case "$1" in
-    1|hermes) do_hermes ;; 2|claude) do_claude ;; 3|claude-token) do_claude_token ;;
-    4|codex) do_codex ;; 5|grok) do_grok ;; 6|gh) do_gh ;;
-    7|messaging) do_messaging ;; 8|obsidian) do_obsidian ;;
-    9|status) do_status ;; 10|shell) do_shell ;; 11|chat) do_chat "$@" ;;
+    1|hermes) do_hermes ;;
+    2|claude) do_claude ;;
+    3|claude-token) do_claude_token ;;
+    4|codex) do_codex ;;
+    5|grok) do_grok ;;
+    6|gh) do_gh ;;
+    7|messaging) do_messaging ;;
+    8|obsidian) do_obsidian ;;
+    9|status) do_status ;;
+    10|shell) do_shell ;;
+    11|chat) do_chat "$@" ;;
     q|Q|quit) exit 0 ;;
   esac
 }

@@ -1,0 +1,10 @@
+# One `hermes plugins install …` argument line per plugin; agent.sh skips plugins already
+# installed (`hermes plugins show <name>`).
+#
+# Superpowers 6.4.1 (obra, MIT) — development methodology, pinned to the commit reviewed on
+# 2026-09-19. --force accepts the scanner's CAUTION verdict (never a DANGEROUS one: Hermes still
+# blocks those): the 229 findings are in docs/, tests/ and one prose line of
+# systematic-debugging/SKILL.md (`env | grep IDENTITY` as a CI-debugging example); the only code
+# Hermes executes, .hermes-plugin/__init__.py, registers the skills and injects the
+# using-superpowers bootstrap on the first turn — no network, no exec. Re-review before moving the pin.
+obra/superpowers --ref 5bf4e78011075bcfc0dc295f0724994cd123ee71 --enable --force
