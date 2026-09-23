@@ -1,42 +1,69 @@
-# Règles workspace — VPS Hermes
+# Environnement — VPS Hermes (référence)
 
-Conteneur `hermes-agent`, utilisateur `hermes` (uid 1000). Pas de root, pas de sudo, pas de daemon Docker. Persistent : `/opt/data` et `/workspace` seulement. Le reste est perdu à la MAJ image (dimanche 03:30).
+Fichier géré par `/srv/command-center/agent.sh` (écrasé à chaque sync). La méthode de travail est
+dans ta SOUL ; ici, les faits.
 
-Binaire Hermes : `/opt/hermes/bin/hermes` (`export PATH="/opt/hermes/bin:$PATH"`). Ne jamais éditer `/opt/data/.env`, `config.yaml`, `auth.json` sans demande explicite.
+Conteneur `hermes-agent`, utilisateur `hermes` (uid 1000). Pas de root, pas de sudo, pas de Docker.
+Persistant : `/opt/data` (ton HERMES_HOME, hôte `/srv/hermes/data`) et `/srv/workspace`. Le reste
+est perdu à la mise à jour de l'image (dimanche 03:30).
 
-Un seul agent, une SOUL, des skills. Pas de routage vers des profiles `chief` / `engineer` / `seo` / `researcher` / `health` / `markets`.
+Binaire : `hermes` (sur le PATH). Ne jamais éditer `/opt/data/.env`, `config.yaml`, `auth.json`
+sans demande explicite. Un seul agent, une SOUL, des skills — pas de profiles.
 
-Le code déterministe assure collecte, filtrage, calculs, scoring, tests et déduplication. Un LLM interprète un signal utile ; il ne recalcule pas et ne relit pas sans changement.
+## Le VPS en un coup d'œil (`/srv`)
 
-## Arborescence `/workspace`
+| Dossier hôte | Rôle | Toi |
+|---|---|---|
+| `/srv/workspace` | **tous les projets**, partagé par toi, Orca, herdr et les sessions SSH | lecture/écriture, **même chemin** que l'hôte |
+| `/srv/hermes` | tes données (`data/` = `/opt/data`), Postgres, Obsidian Sync | via `/opt/data` seulement |
+| `/srv/command-center` | scripts de déploiement et d'admin, compose, secrets `.env` | invisible — l'opérateur lance `sudo command-center …` |
+| `/srv/orca` | HOME d'Orca (sessions Claude/Codex/Grok de l'opérateur, desktop + mobile) | invisible |
+| `/srv/helios` | déploiement Helios (`.env`, tinyauth) ; le code est dans `projects/helios` | invisible |
+
+`/workspace` est un alias de `/srv/workspace` (anciens chemins, kanban). Écris les nouveaux
+chemins en `/srv/workspace/…` : ils sont valides tels quels sur l'hôte, dans Orca et dans herdr.
+
+## Arborescence `/srv/workspace`
 
 | Chemin | Usage |
 |---|---|
-| `projects/<repo>/` | Un clone git par dépôt. **Ne pas aplatir** vers `/workspace/<repo>`. Contexte projet dans `AGENTS.md` du repo (ne pas écraser). |
+| `projects/<repo>/` | Un clone git par dépôt (dont `helios`, `indo-vacation`, `hermes-agent`). Contexte : `AGENTS.md` du repo (ne pas écraser). |
+| `worktrees/hermes/<repo>-<sujet>/` | Tes worktrees git. Orca et herdr ont `worktrees/orca/` et `worktrees/herdr/`. |
+| `scratch/` | Jetable, sans secrets. `scratch/briefs/` : briefs pour une session Orca/herdr de l'opérateur. |
 | `db/migrations/` | SQL Postgres versionné. Appliquer, ne pas bricoler à la main. |
-| `scratch/` | Jetable. Persistant sur disque mais sans valeur. Pas de secrets. |
-| `vault/` | Vault Obsidian (Sync). Règles : `vault/AGENTS.md` et skill `obsidian`. Ne pas toucher `vault/.obsidian/`. |
-| `helios/` | Watchlist du dashboard Helios : `data/watchlist/` (données, à toi) + `tools/watchlist.py` (CLI, copie gérée par Orca — ne pas éditer). Skill `watchlist`. |
+| `vault/` | Vault Obsidian (Sync). Règles : `vault/AGENTS.md` + skill `obsidian`. Ne pas toucher `vault/.obsidian/`. |
+| `helios/` | Watchlist du dashboard Helios : `data/watchlist/` (à toi) + `tools/watchlist.py` (copie gérée par le déploiement — ne pas éditer). Skill `watchlist`. |
+| `AGENTS.md`, `HERMES.md` | Règles du workspace (gérées par le command center). |
 
-Côté hôte le même arbre est `/srv/hermes/projects`. L'agent voit `/workspace/projects/<repo>` ; Orca ouvre le même chemin. Ne pas inventer `/workspace/<repo>` à la racine.
+`/opt/data/projects/<repo>` sont des liens vers `projects/<repo>` (anciens chemins).
 
-Données personnelles structurées → Postgres (`psql`, env `PG*` déjà là) et sqlite sous `/opt/data/private/`. Notes → vault. Tâches durables → Kanban (boards métier : sites-seo, outils, veille, markets, health). Code déployable → git distant (`gh`) ; Orca/opérateur déploie, jamais depuis ce conteneur.
+## Outils disponibles ici
+
+| Outil | Usage |
+|---|---|
+| `claude` (Claude Code), `codex`, `grok` | CLIs de code, HOME `/opt/data/home`. Non interactif : `claude -p "…"`, `codex exec "…"`, lancés dans le worktree. |
+| `gh`, `git` | PRs, issues, clones (HTTPS via `gh`). |
+| `psql` (`PG*`, `DATABASE_URL`) | Postgres `hermes-postgres:5432`, base `hermes`. |
+| `python3`, `uv`, `node`, `jq`, `tmux` | Scripts ; venv dans le projet, jamais global. |
+| `delegate_task`, Cron, Kanban | Sous-tâches, récurrence, travail durable. |
 
 ## Interdit
 
-- `sudo`, `apt`, Docker daemon, exposer un port, stocker hors `/opt/data` et `/workspace`.
-- Supprimer des données dans `/workspace`, `vault/` ou Postgres sans confirmation explicite.
+- `sudo`, `apt`, Docker, exposer un port, stocker hors `/opt/data` et `/srv/workspace`.
+- Déployer : tu prépares (commit, PR, commande exacte), l'opérateur lance `sudo command-center …`.
+- Supprimer des données dans le workspace, `vault/` ou Postgres sans confirmation explicite.
 - Secrets dans le vault, les commits, MEMORY.md ou les handoffs.
-- Mélanger contextes de dépôts, ni coller l'historique health/markets dans MEMORY.md ou un board Kanban.
-- claude / codex / grok absents de ce conteneur ; ne pas les invoquer ici — session interactive via Orca sur l'hôte.
+- Mélanger les contextes de dépôts ; coller l'historique health/markets dans MEMORY.md ou un board Kanban.
 
 ## Git
 
-Identité globale : `LOUKASSS` / `loukass7@pm.me`. HTTPS via `gh`. Branche, commit, PR : skill `github`. Un worktree ou un dossier `projects/<repo>` par contexte. `gh` est disponible ici (PRs depuis une session Hermes) et sur l'hôte (Orca).
+Identité globale : `LOUKASSS` / `loukass7@pm.me`. HTTPS via `gh`. Branche, commit, PR : skill
+`github`. Une branche + un worktree par tâche ; jamais de travail direct sur `main`/`master`.
 
 ## Postgres et privé
 
-Hôte `hermes-postgres:5432`, base `hermes`, user `hermes`. Schémas `health` et `markets`. Migrations dans `db/migrations/`. Tables avec PK + `created_at`. `markets.trades.mode` = `paper` uniquement.
+Schémas `health` et `markets`. Migrations dans `db/migrations/`. Tables avec PK + `created_at`.
+`markets.trades.mode` = `paper` uniquement.
 
 | Données | Où |
 |---|---|
@@ -44,16 +71,17 @@ Hôte `hermes-postgres:5432`, base `hermes`, user `hermes`. Schémas `health` et
 | Marchés | Postgres `markets` + `/opt/data/private/markets.sqlite3` |
 | Veille sujets | `/opt/data/private/watch-topics.json` |
 
-## Délégation
+## Déploiement (côté opérateur, pour info)
 
-| Cas | Outil | Retour |
-|---|---|---|
-| Sous-tâche courte, parallèle, non durable | `delegate_task` (enfant terra par défaut) | résumé enfant ; vérifier les effets de bord |
-| Session interactive Claude / Codex / Grok | **Orca sur l'hôte** (binaires absents du conteneur) | brief écrit dans le projet ; l'opérateur ouvre Orca |
-| Recurrence / hors process | Cron natif (`--paused` tant que la source n'est pas réelle) | livraison Cron, pas un spawn |
-
-`delegate_task` = sous-problème temporaire, pas un profile fantôme. Gros chantier coding : Orca, pas un CLI dans ce terminal.
+| Cible | Commande que tu donnes à l'opérateur |
+|---|---|
+| Helios (après merge dans `projects/helios`) | `sudo command-center helios deploy` |
+| Toi-même (image, compose) | `sudo command-center deploy hermes` |
+| Tes skills / SOUL / MCP (repo command-center) | `sudo command-center hermes sync` |
+| Tout voir | `sudo command-center status` |
 
 ## Vault
 
-Handoff via le skill `obsidian` : lire `vault/AGENTS.md` et le protocole `07 ⚙️ Protocoles/`, modèle `08 🧰 Templates/Handoff agent.md`. Inbox unique : `/workspace/vault/00 📥 Inbox/Agents/default/YYYY-MM-DD--<id>.md`. Audit vault avant clôture. Pas de handoff pour une simple réponse conversationnelle. Pas de secrets, ni données santé ou marchés dans le vault.
+Handoff via le skill `obsidian` : lire `vault/AGENTS.md` et le protocole `07 ⚙️ Protocoles/`,
+modèle `08 🧰 Templates/Handoff agent.md`. Inbox : `/srv/workspace/vault/00 📥 Inbox/Agents/default/YYYY-MM-DD--<id>.md`.
+Audit vault avant clôture. Pas de handoff pour une simple réponse. Pas de secrets, ni données santé ou marchés dans le vault.
