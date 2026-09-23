@@ -1,11 +1,18 @@
-# Hermes Agent + Traefik — single-VPS stack.
+# Command center — platform (Traefik, socket proxy, tailnet DNS) + the Hermes agent project
+# (hermes-agent, PostgreSQL, Obsidian Sync) on one VPS. Helios has its own compose project
+# (helios.sh, code in the workspace) and joins the `proxy` network created here.
 #
+#   command-center → menu / one-click deploys for every service (hermes, orca, helios, herdr)
 #   install.sh  → first boot on a fresh VPS
 #   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh), messaging platforms
 #   backup.sh   → restic backups to Backblaze B2 (nightly timer)
-#   update.sh   → rebuild + pull + recreate (weekly timer)
+#   update.sh   → pull public images + agent/CLI rebuild + recreate (weekly timer)
 #   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
 #   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
+#
+# Do not checkout this compose on the live VPS before migrate-single-agent.sh has
+# removed data/active_profile. `hermes gateway run` without -p default follows the
+# sticky named profile and steals :8642; update.sh refuses while that file exists.
 #
 # Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
 #   traefik ──proxy──▶ hermes-agent ─ :9120 dashboard (basic auth) = https://HERMES_HOST, also
@@ -15,10 +22,15 @@
 #   dns :53 on the Tailscale IP — answers DNS_ZONE and *.DNS_ZONE with that IP, for Tailscale
 #   split DNS (admin console → DNS → nameserver restricted to DNS_ZONE). obsidian-sync (profile obsidian)
 #   Orca is NOT a container: orca.sh installs it on the host as a systemd service (orca.service).
+#   herdr is NOT a container either: herdr.sh installs it for the operator user (ssh hermes@vps → herdr).
 #
 # The dashboard is the image's own s6-supervised service (HERMES_DASHBOARD=1) inside hermes-agent:
 # same PID namespace as the gateway (liveness detection) and no second container to keep in sync.
 # A non-loopback bind engages its auth gate, satisfied by the bundled username/password provider.
+
+# Fixed project name: the checkout moved from /srv/hermes/stack to /srv/command-center, and a
+# compat symlink must never make compose derive a second project from the directory name.
+name: command-center
 
 x-hermes-uid: &hermes-uid
   HERMES_UID: ${HERMES_UID:-1000}
@@ -116,7 +128,7 @@ services:
       - "${DESKTOP_BIND:-127.0.0.1}:80:80"
       - "${DESKTOP_BIND:-127.0.0.1}:443:443"
     volumes:
-      - ${TRAEFIK_DIR:-/srv/hermes/traefik}/acme.json:/acme/acme.json
+      - ${TRAEFIK_DIR:-./state/traefik}/acme.json:/acme/acme.json
     networks:
       - proxy
       - docker-api
@@ -134,17 +146,20 @@ services:
     container_name: hermes-agent
     restart: unless-stopped
     logging: *logging
-    # `-p default` is required: a bare `hermes gateway run` follows the sticky `active_profile` file
-    # (set when you switch profiles in the dashboard), which under s6 starts THAT profile's gateway
-    # slot next to the default one — the newcomer grabs 127.0.0.1:8642 first and the default
-    # multiplexer's api_server is parked ("Port 8642 already in use").
-    command: ["hermes", "-p", "default", "gateway", "run"]
+    # Single default agent: HERMES_HOME=/opt/data. Recreate only after migrate has removed
+    # data/active_profile and multiplex_profiles (a leftover sticky named profile still steals 8642).
+    command: ["hermes", "gateway", "run"]
     shm_size: 1g
     mem_limit: ${AGENT_MEM_LIMIT:-10g}
     memswap_limit: ${AGENT_MEM_LIMIT:-10g}   # = mem_limit: no swap on top
     cpus: ${AGENT_CPUS:-6}
     pids_limit: 4096   # LLM-driven shells: a fork bomb stays inside the container
     security_opt: *nnp
+    # s6 runs as root only to remap the hermes uid (usermod), chown /opt/data, fix the supervise/
+    # trees and signal the services it drops to (s6-setuidgid). The LLM's shells run as hermes
+    # and lose the default extras (NET_RAW, MKNOD, SYS_CHROOT, SETFCAP, AUDIT_WRITE…).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, SETGID, SETUID]
     environment:
       <<: *hermes-uid
       # Dashboard (web UI + Hermes Desktop backend), reached through Traefik and on DESKTOP_BIND.
@@ -154,6 +169,10 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${DESKTOP_USERNAME:-admin}
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DESKTOP_PASSWORD:?set by install.sh}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${DESKTOP_SECRET:?set by install.sh}
+      # Every Hermes profile has its own HOME, but GitHub authentication and the Git
+      # credential helper are intentionally shared across profiles. auth.sh writes here.
+      GH_CONFIG_DIR: /opt/data/home/.config/gh
+      GIT_CONFIG_GLOBAL: /opt/data/home/.gitconfig
       # Gateway HTTP API (OpenAI-compatible; named profiles at /p/<name>/… with their own key).
       # Loopback only: nothing outside the container uses it (curl from the agent's terminal does).
       API_SERVER_ENABLED: "true"
@@ -169,10 +188,16 @@ services:
       PGDATABASE: ${POSTGRES_DB:-hermes}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hermes}:${POSTGRES_PASSWORD:?set by install.sh}@hermes-postgres:5432/${POSTGRES_DB:-hermes}
       # Hermes' bundled Obsidian skill reads the vault path from this variable.
-      OBSIDIAN_VAULT_PATH: /workspace/${OBSIDIAN_VAULT_DIR:-vault}
+      OBSIDIAN_VAULT_PATH: ${HERMES_WORKSPACE_DIR:-/srv/workspace}/${OBSIDIAN_VAULT_DIR:-vault}
+      # Shared workspace, same absolute path as on the host (Orca, herdr, SSH shells).
+      WORKSPACE_DIR: ${HERMES_WORKSPACE_DIR:-/srv/workspace}
     volumes:
       - ${HERMES_DATA_DIR:-/srv/hermes/data}:/opt/data
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}:/workspace
+      # The workspace is mounted at its HOST path, so every absolute path (git worktrees, paths
+      # quoted in handoffs, Orca / herdr sessions) is valid on both sides. /workspace is the
+      # historical alias (old sessions, kanban workspaces); the host has a /workspace symlink too.
+      - ${HERMES_WORKSPACE_DIR:-/srv/workspace}:${HERMES_WORKSPACE_DIR:-/srv/workspace}
+      - ${HERMES_WORKSPACE_DIR:-/srv/workspace}:/workspace
     networks:
       - proxy
       - data
@@ -184,9 +209,8 @@ services:
       # Bound to the Tailscale IP by install.sh (DESKTOP_BIND) — tailnet only.
       - "${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}:${DESKTOP_PORT:-9120}"
     healthcheck:
-      # /p/default/health answers 200 only on the default (multiplexing) gateway — a per-profile
-      # gateway that stole 8642 returns 404 there, while plain /health is 200 on both.
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/p/default/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
+      # /health is the default gateway; /api/status catches a dashboard-only hang.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8642/health >/dev/null && curl -fsS http://127.0.0.1:${DESKTOP_PORT:-9120}/api/status >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -238,15 +262,12 @@ services:
       retries: 5
       start_period: 30s
 
-  # Authoritative-only DNS for the tailnet (dns/: dnsmasq on Alpine). Published on the Tailscale IP;
-  # point Tailscale split DNS at it and every device on the tailnet resolves HERMES_HOST (and any
-  # other name under DNS_ZONE, for your own projects behind this Traefik) to this VPS — no public
-  # A record needed. Forwards nothing: only the zone is answered.
+  # Authoritative-only DNS for the tailnet (public 4km3/dnsmasq; zone via command, conf bind-mounted).
+  # Published on the Tailscale IP; point Tailscale split DNS at it and every device on the tailnet
+  # resolves HERMES_HOST (and any other name under DNS_ZONE, for your own projects behind this Traefik)
+  # to this VPS — no public A record needed. Forwards nothing: only the zone is answered.
   dns:
-    build:
-      context: ./dns
-      pull: true
-    image: hermes-dns:latest
+    image: 4km3/dnsmasq:2.90-r3
     container_name: hermes-dns
     restart: unless-stopped
     logging: *logging
@@ -254,35 +275,39 @@ services:
     pids_limit: 32
     security_opt: *nnp
     cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE, SETUID, SETGID, CHOWN]   # bind :53 as root, then drop to user=dnsmasq
+    cap_add: [NET_BIND_SERVICE, NET_ADMIN, SETUID, SETGID, CHOWN]   # 4km3 needs NET_ADMIN; then drop to user=dnsmasq
     read_only: true
-    tmpfs: [/etc/dnsmasq.d, /run]   # entrypoint.sh renders zone.conf; pid file
+    tmpfs: [/etc/dnsmasq.d, /run]   # empty conf-dir + pid file
     networks: [dns]   # answer-only resolver: no Internet egress at all
     environment:
-      DNS_ZONE: ${DNS_ZONE:-${HERMES_HOST}}
-      DNS_IP: ${DESKTOP_BIND:-127.0.0.1}
       TZ: ${TZ:-UTC}
+    # Pin so a rollback retag of hermes-dns:latest as 4km3/dnsmasq still applies
+    # command flags (custom image ENTRYPOINT is /entrypoint.sh).
+    entrypoint: ["/usr/sbin/dnsmasq", "--keep-in-foreground"]
+    command:
+      - --conf-file=/etc/dnsmasq.conf
+      - --log-facility=-
+      - --address=/${DNS_ZONE:-${HERMES_HOST}}/${DESKTOP_BIND:-127.0.0.1}
+      - --local=/${DNS_ZONE:-${HERMES_HOST}}/
+    volumes:
+      - ./dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
     ports:
       - "${DESKTOP_BIND:-127.0.0.1}:53:53/udp"
       - "${DESKTOP_BIND:-127.0.0.1}:53:53/tcp"
     healthcheck:
-      test: ["CMD-SHELL", "nslookup \"$$DNS_ZONE\" 127.0.0.1 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "nslookup \"${DNS_ZONE:-${HERMES_HOST}}\" 127.0.0.1 >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  # Obsidian Sync headless client (npm obsidian-headless, `ob`) in its own minimal image.
-  # Keeps /srv/hermes/workspace/<vault> (the agent's /workspace/<vault>) in sync with your
+  # Obsidian Sync headless client (`ob`) on the official node image. obsidian-headless is
+  # installed at start into the persistent HOME volume (obsidian/entrypoint.sh).
+  # Keeps /srv/workspace/<vault> (same path inside hermes-agent) in sync with your
   # Obsidian Sync remote vault. Single sync client per vault: the agent only reads/writes files.
   # Disabled until configured: `sudo ./auth.sh obsidian` runs `ob login` + `ob sync-setup`
   # against the same HOME volume and enables the `obsidian` compose profile.
   obsidian-sync:
-    build:
-      context: ./obsidian
-      pull: true
-      args:
-        OBSIDIAN_HEADLESS_VERSION: ${OBSIDIAN_HEADLESS_VERSION:-latest}
-    image: obsidian-sync:latest
+    image: node:22-bookworm-slim
     container_name: obsidian-sync
     restart: unless-stopped
     logging: *logging
@@ -290,27 +315,67 @@ services:
     memswap_limit: 1g
     pids_limit: 256
     security_opt: *nnp
+    cap_drop: [ALL]   # runs as the runtime user from the start: nothing to keep
     profiles: ["obsidian"]
     user: "${HERMES_UID:-1000}:${HERMES_GID:-1000}"
+    working_dir: /vault
     environment:
       HOME: /data
+      NPM_CONFIG_PREFIX: /data
       TZ: ${TZ:-UTC}
+      OBSIDIAN_HEADLESS_VERSION: ${OBSIDIAN_HEADLESS_VERSION:-0.0.14}
     volumes:
       - ${OBSIDIAN_DIR:-/srv/hermes/obsidian}:/data
-      - ${HERMES_WORKSPACE_DIR:-/srv/hermes/workspace}/${OBSIDIAN_VAULT_DIR:-vault}:/vault
+      - ${HERMES_WORKSPACE_DIR:-/srv/workspace}/${OBSIDIAN_VAULT_DIR:-vault}:/vault
+      - ./obsidian/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    command: ["sync", "--continuous", "--path", "/vault"]
+    networks:
+      - obsidian
+    healthcheck:
+      # `ob sync --continuous` appends to its sync.log every 30 s ("Fully synced" or the change
+      # list); a client hung on the Obsidian Sync websocket stays "Up" but stops writing it.
+      test: ["CMD-SHELL", "find /data/.config/obsidian-headless/sync -name sync.log -mmin -5 | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 300s   # first npm i -g into the volume can exceed 120s
 
+# Subnets are pinned: compose creates the networks in parallel, so a floating one could grab the
+# proxy range first; and Helios' tinyauth trusts X-Forwarded-* only from the proxy subnet
+# (its PROXY_SUBNET), so a recreate must never move it.
 networks:
+  # Shared with Helios (and any project behind this Traefik).
   proxy:
     name: proxy
+    ipam:
+      config:
+        - subnet: ${PROXY_SUBNET:-172.20.0.0/16}
   docker-api:
     name: docker-api
     internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
   # Agent ↔ PostgreSQL. Your own compose projects can join it (`networks: {data: {external: true,
   # name: hermes-data}}`) to use the database with the same credentials.
   data:
     name: hermes-data
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+  # obsidian-sync only talks to the Obsidian Sync servers: its own network, no path to the
+  # agent, Traefik or the database.
+  obsidian:
+    name: hermes-obsidian
+    ipam:
+      config:
+        - subnet: 172.23.0.0/16
   dns:
     name: hermes-dns
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
     # Not `internal` (that would drop the published :53); no masquerading instead, so the
     # container's packets to the Internet never get a route back.
     driver_opts:

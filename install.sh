@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bootstrap the Hermes stack on a fresh Debian/Ubuntu VPS. Idempotent: safe to re-run.
+# Bootstrap the platform + Hermes agent on a fresh Debian/Ubuntu VPS. Idempotent: safe to re-run.
+# One-click entry point for everything else (orca, helios, herdr): /srv/command-center/command-center
 #
 #   sudo ./install.sh
 #
@@ -24,7 +25,9 @@ else
   info "Docker already installed: $(docker --version)"
 fi
 docker compose version >/dev/null 2>&1 || die "docker compose plugin missing (apt install docker-compose-plugin)."
-command -v openssl >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends openssl; }
+for _pkg in openssl rsync; do   # rsync: agent.sh sync-files copies skills/ + mcp/ into the data dir
+  command -v "$_pkg" >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends "$_pkg"; }
+done
 
 # ── 2. .env ──────────────────────────────────────────────────────────────
 if [ ! -f .env ]; then
@@ -70,15 +73,23 @@ if [ -n "$TS_IP" ]; then
   esac
 else
   [ -n "$cur_bind" ] || set_env DESKTOP_BIND 127.0.0.1
-  warn "No Tailscale IP found: Traefik (80/443), dashboard (9120), DNS (53) and Orca (6768) stay on $(env_val DESKTOP_BIND). Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
+  warn "No Tailscale IP found: Traefik (80/443), dashboard (9120) and DNS (53) stay on $(env_val DESKTOP_BIND), Orca (6768) would advertise it. Run harden.sh (Tailscale) and re-run, or set DESKTOP_BIND in .env to a private IP yourself."
 fi
+# /srv layout (lib/common.sh). A live pre-/srv install is moved by migrate-srv-layout.sh, which
+# rewrites these; install.sh only fills them when empty.
+[ -n "$(env_val HERMES_WORKSPACE_DIR)" ] || set_env HERMES_WORKSPACE_DIR "$SRV_ROOT/workspace"
+[ -n "$(env_val HERMES_DATA_DIR)" ] || set_env HERMES_DATA_DIR "$SRV_ROOT/hermes/data"
+[ -n "$(env_val TRAEFIK_DIR)" ] || set_env TRAEFIK_DIR "$STACK_DIR/state/traefik"
+case "$(env_val OBSIDIAN_HEADLESS_VERSION)" in ""|latest) set_env OBSIDIAN_HEADLESS_VERSION 0.0.14 ;; esac
 # Port 53 is published on DESKTOP_BIND; a resolver bound to 0.0.0.0 or to that same IP would clash.
+# Our own hermes-dns (docker-proxy) is not a clash — on a re-run it is already listening there.
 _bind="$(env_val DESKTOP_BIND)"
-if ss -lunH 'sport = :53' 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]|${_bind//./\\.}):"; then
-  warn "something already listens on ${_bind}:53 ($(ss -lunpH 'sport = :53' | awk '{print $4, $NF}' | head -n1)) — the dns service will fail to start until it is moved/stopped."
+_clash="$(ss -lunpH 'sport = :53' 2>/dev/null | grep -v '"docker-proxy"' | awk '{print $4, $NF}' | grep -E "^(0\.0\.0\.0|\*|\[::\]|${_bind//./\\.}):" | head -n1 || true)"
+if [ -n "$_clash" ]; then
+  warn "something already listens on ${_bind}:53 ($_clash) — the dns service will fail to start until it is moved/stopped."
 fi
 
-# Owner of /srv/hermes/*: the `hermes` operator user created by harden.sh (always re-derived:
+# Owner of /srv/{hermes,workspace,orca,helios}: the `hermes` operator user created by harden.sh (always re-derived:
 # its uid can differ on a rebuilt VPS), else the user who invoked sudo, else 1000.
 if id hermes >/dev/null 2>&1; then
   set_env HERMES_UID "$(id -u hermes)"; set_env HERMES_GID "$(id -g hermes)"
@@ -91,16 +102,25 @@ fi
 
 load_env
 
+# This compose's gateway is `hermes gateway run` without -p default. Recreating
+# on a six-profile tree (sticky active_profile) steals :8642. Fresh VPS: neither path exists.
+if [ -e "$HERMES_DATA_DIR/active_profile" ] || [ -d "$HERMES_DATA_DIR/profiles/chief" ]; then
+  die "refusing install: six-profile data still present ($HERMES_DATA_DIR/active_profile or profiles/chief). Touch $STACK_DIR/.maintenance then sudo $STACK_DIR/migrate-single-agent.sh"
+fi
+
 # ── 3. Host storage ──────────────────────────────────────────────────────
 info "Preparing ${HERMES_DATA_DIR}, ${HERMES_WORKSPACE_DIR}, ${TRAEFIK_DIR}, ${OBSIDIAN_DIR}, ${POSTGRES_DIR}"
-mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
+mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_DATA_DIR/private" "$HERMES_DATA_DIR/mcp" \
+  "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$TRAEFIK_DIR" "$OBSIDIAN_DIR"
 # data/ is chowned to the postgres user by the image's entrypoint; dumps/ is written by backup.sh (root).
 mkdir -p "$POSTGRES_DIR/data" "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR" "$POSTGRES_DIR/dumps"
 no_symlink "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
+ensure_workspace
 # acme.json stays root-owned: Traefik runs as root with cap_drop ALL (no DAC_OVERRIDE), so it can
 # only open a mode-600 file it owns. Re-run of install.sh fixes older hermes-owned installs.
 touch "$TRAEFIK_DIR/acme.json"
 chown 0:0 "$TRAEFIK_DIR" "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.json"
+[ "$(dirname "$TRAEFIK_DIR")" != "$STACK_DIR/state" ] || chmod 755 "$STACK_DIR/state"
 chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR"
 # Credentials live here (OAuth tokens under data/home, Obsidian login under obsidian/): owner only.
 chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_DIR"
@@ -109,13 +129,22 @@ chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_D
 # alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
 chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
+# Seed config.yaml BEFORE the first compose up — otherwise the image writes the
+# upstream Hermes seed (_config_version, no MCP, multiplex on).
+if [ ! -f "$HERMES_DATA_DIR/config.yaml" ]; then
+  [ -f "$STACK_DIR/agent/config.yaml" ] || die "missing $STACK_DIR/agent/config.yaml"
+  info "Seeding $HERMES_DATA_DIR/config.yaml from agent/config.yaml"
+  no_symlink "$HERMES_DATA_DIR/config.yaml"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/config.yaml" "$HERMES_DATA_DIR/config.yaml"
+fi
+
 # ── 4. Build + start ─────────────────────────────────────────────────────
 # Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
 if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
   lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
 fi
-info "Building derived image (pulls nousresearch/hermes-agent:latest)…"
-compose build --pull
+info "Building agent image with coding CLIs…"
+compose build --pull hermes-agent
 info "Pulling remaining images…"
 compose pull --ignore-buildable
 info "Starting stack…"
@@ -125,10 +154,18 @@ compose up -d --remove-orphans
 info "Waiting for hermes-agent to become healthy (up to 3 min)…"
 wait_healthy hermes-agent 180 || { compose logs --tail=50 hermes-agent; die "hermes-agent not healthy after 3 min."; }
 
-# The image seeds config.yaml on first boot; point the agent's terminal at the shared files dir.
-if [ "$(agent_run hermes -p default config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "/workspace" ]; then
-  info "Setting terminal.cwd = /workspace"
-  agent_run hermes -p default config set terminal.cwd /workspace >/dev/null
+# Point the agent's terminal at the shared workspace — its host path, mounted at the same path.
+if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "$HERMES_WORKSPACE_DIR" ]; then
+  info "Setting terminal.cwd = $HERMES_WORKSPACE_DIR"
+  agent_run hermes config set terminal.cwd "$HERMES_WORKSPACE_DIR" >/dev/null
+fi
+
+# ── 5b. Default agent (skills, SOUL, health MCP) ─────────────────────────
+# Re-run after a git pull that touched agent/ or skills/: sudo CUTOVER=1 ./agent.sh sync
+if [ "${ALLOW_NON_ROOT:-0}" != 1 ]; then
+  info "Syncing the default agent from agent/ + skills/ + mcp/…"
+  CUTOVER=1 UPDATE_LOCKED=1 "$STACK_DIR/agent.sh" sync \
+    || die "agent.sh sync failed — fix and re-run: sudo CUTOVER=1 UPDATE_LOCKED=1 $STACK_DIR/agent.sh sync"
 fi
 
 # Hermes layers its external secret sources (config.yaml secrets.*, e.g. Bitwarden Secrets Manager)
@@ -161,6 +198,7 @@ if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
   for unit in "$STACK_DIR"/systemd/*; do
     sed "s|@STACK_DIR@|$STACK_DIR|g" "$unit" > "/etc/systemd/system/$(basename "$unit")"
   done
+  docker_wait_for_tailscale   # ports bind DESKTOP_BIND: dockerd must not start before tailscaled has the IP
   systemctl daemon-reload
   systemctl enable --now hermes-update.timer hermes-heal.timer >/dev/null
   if [ -n "$(env_val B2_ACCOUNT_KEY)" ] && [ -n "$(env_val RESTIC_PASSWORD)" ]; then
@@ -183,10 +221,11 @@ cat <<MSG
   Hermes Desktop: Settings → Gateways → Remote gateway → https://${HERMES_HOST} (or http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}),
                   same user / password
   PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
-  Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials)
-  Files dir     : ${HERMES_WORKSPACE_DIR}   (drop files here → /workspace for the agent)
+  Agent         : default (sudo ./agent.sh status) — skills in ${HERMES_DATA_DIR}/skills, MCP in ${HERMES_DATA_DIR}/mcp
+  Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials, skills, private/)
+  Workspace     : ${HERMES_WORKSPACE_DIR}   (same path in the agent, Orca, herdr; /workspace = alias)
   Backups       : ${backup_note}
-  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — manual: sudo ./update.sh; undo: sudo ./update.sh rollback
+  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — pull + agent/CLI rebuild; undo: sudo ./update.sh rollback
   Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited; touch .maintenance to pause)
 
   These secrets are also in .env (mode 600). Clear this terminal's scrollback if it is shared or logged.
@@ -196,6 +235,7 @@ Next: configure model providers, CLI logins and messaging with your subscription
   sudo ./auth.sh
   sudo ./backup.sh setup     # Backblaze B2 backups (recommended before you rely on the agent)
   sudo ./orca.sh install     # optional: Orca remote server on the host (claude/codex/grok yourself, desktop + phone)
+  sudo ./command-center      # menu: one-click deploy of orca / helios / herdr, status of every service
 
 Traefik requests the certificate (DNS-01 via Cloudflare) as soon as it starts — give it ~1-2 min; no public DNS needed.
 MSG

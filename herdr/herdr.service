@@ -1,0 +1,30 @@
+# herdr headless server for the operator user. Installed and filled in by herdr.sh.
+# Panes (shells, claude / codex / grok sessions) live in this server: they survive SSH
+# disconnects and client detaches. `ssh hermes@<vps>` then `herdr` (or `herdr --remote`)
+# attaches to it — the socket is $HOME/.config/herdr/herdr.sock, shared with login shells.
+[Unit]
+Description=herdr server (terminal workspace for coding agents, user @USER@)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+Group=@USER@
+WorkingDirectory=@WORKDIR@
+Environment=HOME=@HOME@
+Environment=USER=@USER@
+Environment=LOGNAME=@USER@
+Environment=SHELL=/bin/bash
+Environment=LANG=C.UTF-8
+Environment=PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=WORKSPACE=@WORKDIR@
+ExecStart=@HOME@/.local/bin/herdr server
+# `herdr server stop` (or an update restart) exits 0: stay stopped until the next start.
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+MemoryMax=@MEM@
+
+[Install]
+WantedBy=multi-user.target

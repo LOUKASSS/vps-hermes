@@ -1,4 +1,4 @@
-# Derived Hermes Agent image: official base + GitHub CLI + subscription-OAuth coding CLIs.
+# Derived Hermes Agent image: official base + host-like operator tools and coding CLIs.
 # The base image starts as root under s6-overlay and drops to the `hermes` user per
 # service, so we deliberately do NOT add a trailing `USER` instruction.
 FROM nousresearch/hermes-agent:latest
@@ -6,7 +6,6 @@ FROM nousresearch/hermes-agent:latest
 USER root
 ARG DEBIAN_FRONTEND=noninteractive
 
-# GitHub CLI (official apt repo) + a few operator conveniences
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         tmux jq less nano postgresql-client && \
@@ -30,7 +29,7 @@ RUN npm install -g --no-audit --no-fund --fetch-retries=5 \
         @xai-official/grok && \
     npm cache clean --force
 
-# Disable CLI self-updaters: the install tree is immutable and updates come from image rebuilds.
+# The image is immutable; CLI updates are applied by rebuilding it.
 ENV DISABLE_AUTOUPDATER=1 \
     CODEX_DISABLE_UPDATE_CHECK=1
 
@@ -39,4 +38,4 @@ ENV DISABLE_AUTOUPDATER=1 \
 # execs the venv binary by absolute path).
 RUN ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
 
-RUN gh --version && claude --version && codex --version && grok --version && /usr/local/bin/hermes --version
+RUN gh --version && psql --version && claude --version && codex --version && grok --version && /usr/local/bin/hermes --version

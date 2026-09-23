@@ -4,9 +4,19 @@
 *.local
 *.local-test
 acme.json
+# runtime state of the platform (Traefik ACME store) — lives next to the scripts, never committed
+state/
 .claude/
 .maintenance
 .update-hold
 *.zip
 restore/
 hermes-ssh/
+
+# never: bot tokens pasted next to the scripts (rotate them if this ever matched)
+discord.txt
+*.token
+*.tokens
+mcp/**/node_modules/
+mcp/**/dist/
+mcp/**/.built-from

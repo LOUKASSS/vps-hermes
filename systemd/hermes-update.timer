@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly Hermes stack update (Sunday 03:30, after the backup, before the 04:30 reboot window)
+Description=Weekly Hermes stack update (Sunday 03:30, after the 03:00 backup; unattended-upgrades reboots at 02:00 when needed)
 
 [Timer]
 OnCalendar=Sun *-*-* 03:30:00

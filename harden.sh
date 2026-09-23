@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare and isolate a fresh Ubuntu VPS before running install.sh:
 #   - operator user `hermes` (sudo NOPASSWD, docker group) with a generated ed25519 key,
-#     owner of /srv/hermes (stack in /srv/hermes/stack, data next to it)
+#     owner of /srv/{command-center,hermes,orca,helios,workspace} (this repo in /srv/command-center)
 #   - Tailscale; SSH + Traefik reachable ONLY through the tailnet
 #   - ufw with a DOCKER-USER block so Docker-published ports don't bypass the firewall
 #   - unattended-upgrades (security + updates + Docker/Tailscale repos), auto-reboot
@@ -82,23 +82,30 @@ else
   info "authorized_keys for $OP_USER already populated — keeping (use --rotate-key to replace)."
 fi
 
-# Everything lives under /srv/hermes, owned by the operator: the stack (this repo) in
-# /srv/hermes/stack, data dirs next to it (created by install.sh).
-HERMES_ROOT=/srv/hermes
-install -d -m 755 -o "$OP_USER" -g "$OP_USER" "$HERMES_ROOT"
-if [ "$STACK_DIR" != "$HERMES_ROOT/stack" ]; then
-  if [ -e "$HERMES_ROOT/stack/.git" ]; then
-    warn "$HERMES_ROOT/stack already exists — not overwritten. Update it with 'git pull' there, and re-run harden.sh from there next time."
+# One folder per project under /srv, owned by the operator:
+#   /srv/command-center  this repo (scripts, compose, .env)   /srv/hermes   agent data (install.sh)
+#   /srv/orca            Orca HOME (orca.sh)                   /srv/helios   Helios deployment (helios.sh)
+#   /srv/workspace       shared projects (install.sh)
+CC_DIR=/srv/command-center
+for d in /srv/hermes /srv/helios /srv/workspace; do install -d -m 755 -o "$OP_USER" -g "$OP_USER" "$d"; done
+if [ "$(cd -P "$STACK_DIR" && pwd -P)" != "$CC_DIR" ]; then
+  if [ -e "$CC_DIR/.git" ]; then
+    warn "$CC_DIR already exists — not overwritten. Update it with 'git pull' there, and re-run harden.sh from there next time."
+  elif [ -e /srv/hermes/stack/.git ] && [ ! -L /srv/hermes/stack ]; then
+    warn "pre-/srv layout found (/srv/hermes/stack): not copying. Move it with: sudo /srv/hermes/stack/migrate-srv-layout.sh"
   else
-    info "Copying stack to $HERMES_ROOT/stack"
-    rsync -a --delete --exclude .env "$STACK_DIR/" "$HERMES_ROOT/stack/"
-    [ -f "$STACK_DIR/.env" ] && [ ! -f "$HERMES_ROOT/stack/.env" ] && cp "$STACK_DIR/.env" "$HERMES_ROOT/stack/.env"
+    info "Copying this repo to $CC_DIR"
+    rsync -a --delete --exclude .env "$STACK_DIR/" "$CC_DIR/"
+    [ -f "$STACK_DIR/.env" ] && [ ! -f "$CC_DIR/.env" ] && cp "$STACK_DIR/.env" "$CC_DIR/.env"
   fi
 fi
-# Only the stack checkout: data dirs are chowned by install.sh (HERMES_UID) and orca.sh owns
-# $HERMES_ROOT/orca — a blanket chown -R here would hand them to the operator on every re-run.
-chown "$OP_USER:$OP_USER" "$HERMES_ROOT"
-chown -R "$OP_USER:$OP_USER" "$HERMES_ROOT/stack"
+# Only the checkout: data dirs are chowned by install.sh (HERMES_UID) and orca.sh owns /srv/orca —
+# a blanket chown -R here would hand them to the operator on every re-run.
+if [ -d "$CC_DIR" ]; then
+  chown -R "$OP_USER:$OP_USER" "$CC_DIR"
+  # …except Traefik's ACME store: Traefik (root, cap_drop ALL) only opens a root-owned 0600 file.
+  [ ! -d "$CC_DIR/state/traefik" ] || chown -R 0:0 "$CC_DIR/state/traefik"
+fi
 
 # ── 3. Kernel / journald / time ──────────────────────────────────────────
 cat > /etc/sysctl.d/90-hardening.conf <<'SYSCTL'
@@ -188,18 +195,9 @@ if [ ! -f /etc/docker/daemon.json ]; then
 DOCKER
 fi
 
-# Published ports bind the Tailscale IP: make dockerd wait (up to 60 s) for tailscaled to have
-# it at boot, or the containers fail to start until heal.sh runs.
-install -d /etc/systemd/system/docker.service.d
-cat > /etc/systemd/system/docker.service.d/10-tailscale.conf <<'UNIT'
-[Unit]
-After=tailscaled.service
-Wants=tailscaled.service
-
-[Service]
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker: no Tailscale IP after 60 s, starting anyway" >&2'
-UNIT
-systemctl daemon-reload
+# dockerd waits for the Tailscale IP at boot (drop-in; tailscale is installed in step 7, so
+# this is a no-op on the first pass and install.sh adds it once Tailscale is there).
+docker_wait_for_tailscale
 
 # ── 7. Tailscale ─────────────────────────────────────────────────────────
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -278,6 +276,11 @@ if systemctl is-active --quiet docker 2>/dev/null; then
   info "Docker is running — restarting it so its iptables chains are rebuilt"
   systemctl restart docker
 fi
+# Same for orca.service: its ExecStartPre re-adds the INPUT rules that pin port ORCA_PORT to the tailnet.
+if systemctl is-active --quiet orca 2>/dev/null; then
+  info "Orca is running — restarting it so its port rules are re-added"
+  systemctl restart orca
+fi
 ufw status verbose | sed 's/^/    /'
 
 # ── 9. Show the key, verify tailnet access, then lock SSH down ──────────
@@ -351,7 +354,7 @@ cat <<MSG
 Done. Next steps:
   1. Log in as the operator and start the stack:
        ssh -i ~/.ssh/hermes_vps $OP_USER@$TS_IP
-       cd /srv/hermes/stack && sudo ./install.sh && sudo ./auth.sh
+       cd /srv/command-center && sudo ./install.sh && sudo ./auth.sh
      No public DNS record needed: the stack's own DNS answers <HERMES_HOST> for the tailnet.
   2. Tailscale admin console → DNS → Nameservers → Add → Custom → $TS_IP, "Restrict to domain" →
      your DNS_ZONE (install.sh prints it). TLS still works via the Cloudflare DNS-01 challenge.

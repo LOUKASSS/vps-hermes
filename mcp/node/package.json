@@ -1,0 +1,1 @@
+{"name":"health-mcp","private":true,"dependencies":{"hevy-mcp":"6.1.13","yazio-mcp":"0.0.14"}}
