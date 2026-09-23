@@ -4,6 +4,8 @@
 *.local
 *.local-test
 acme.json
+# runtime state of the platform (Traefik ACME store) — lives next to the scripts, never committed
+state/
 .claude/
 .maintenance
 .update-hold

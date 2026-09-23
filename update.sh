@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update the stack: rebuild the thin agent image on the newest base, pull public images, recreate.
+# Update the stack: rebuild the agent image and its coding CLIs, pull public images, recreate.
 # Keeps the previous images under a `:previous` tag and rolls back to them automatically when
 # hermes-agent does not come back healthy.
 #
@@ -134,10 +134,10 @@ do_update() {
   info "Keeping the current images as :previous"
   save_previous
   map_cutover_previous
-  # Thin agent image only. Cache allowed: no npm CLIs in the image.
-  # Base digest change (FROM latest) invalidates the apt layer naturally.
-  info "Building thin agent image on the latest base…"
-  compose build --pull hermes-agent
+  # Re-run the npm layer even if the base image digest is unchanged, so unpinned coding CLIs
+  # advance on every scheduled update.
+  info "Building agent image with the latest coding CLIs…"
+  compose build --pull --no-cache hermes-agent
   info "Pulling public images (traefik, postgres, dns, obsidian, proxy, restic)…"
   compose pull --ignore-buildable
   docker pull -q "$RESTIC_IMAGE" >/dev/null
@@ -160,6 +160,10 @@ do_update() {
   # Orca lives on the host (orca.sh); it has its own previous/rollback, independent of the images.
   if [ -e /opt/orca/current ]; then
     "$STACK_DIR/orca.sh" update || warn "Orca update failed (stack update is fine): sudo $STACK_DIR/orca.sh update"
+  fi
+  # herdr (host, operator user): new binary + tode; the running server keeps its panes (no restart).
+  if [ -e /etc/systemd/system/herdr.service ]; then
+    "$STACK_DIR/herdr.sh" update || warn "herdr update failed (stack update is fine): sudo $STACK_DIR/herdr.sh update"
   fi
 }
 

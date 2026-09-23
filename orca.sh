@@ -2,13 +2,13 @@
 # Orca remote server (https://www.onorca.dev/docs/remote-servers) installed ON THE HOST, not in a
 # container: `orca serve` runs as user `hermes` (the harden.sh operator, systemd orca.service,
 # docker group + passwordless sudo via /etc/sudoers.d/90-hermes) with HOME=ORCA_HOME (default
-# /srv/hermes/orca, 0700). That HOME is NOT /home/hermes and is NOT mounted in the agent container:
+# /srv/orca, 0700). That HOME is NOT /home/hermes and is NOT mounted in the agent container:
 # the container writes /srv/hermes/data/home as uid hermes, and a dotfile planted there
 # (~/.claude/settings.json hooks, ~/.gitconfig core.hooksPath, ~/.codex/config.toml MCP commands)
 # would run as a sudoer the next time an Orca session touched it. Only the credential FILES of the
 # agent's claude / codex / grok / gh logins are copied over (`orca.sh creds`); config files never
-# are. Sessions cwd is HERMES_WORKSPACE_DIR (shared projects, also the agent's /workspace). Repo
-# hooks in that tree are overridden by GIT_CONFIG_COUNT (git -c rank); treat projects/ as untrusted
+# are. Sessions cwd is HERMES_WORKSPACE_DIR (/srv/workspace, same path inside the agent). Repo
+# hooks in that tree are overridden by GIT_CONFIG_COUNT (git -c rank); treat the workspace as untrusted
 # for sudo (Makefiles / deploy.sh = accepted residual risk). No dedicated `orca` user.
 #
 #   sudo ./orca.sh install            # hermes HOME, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
@@ -30,13 +30,11 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 need_root
 load_env
-: "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}" "${ORCA_HOME:=/srv/hermes/orca}"
+: "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}" "${ORCA_HOME:=/srv/orca}"
 
 ORCA_USER=hermes
-# Follows .env. lib/common.sh fallback stays /srv/hermes/workspace until migrate, so this
-# :-projects default is dead after load_env. PR8 must set_env HERMES_WORKSPACE_DIR
-# /srv/hermes/projects before write_service so WorkingDirectory is not workspace.
-ORCA_WORKDIR="${HERMES_WORKSPACE_DIR:-/srv/hermes/projects}"
+# Sessions start in the shared workspace (lib/common.sh default /srv/workspace).
+ORCA_WORKDIR="$HERMES_WORKSPACE_DIR"
 ORCA_HOOKS="$ORCA_HOME/git-hooks"
 ORCA_ROOT=/opt/orca
 ORCA_ENV=/etc/orca.env
@@ -85,7 +83,7 @@ ensure_user() {
 ensure_gitconfig() {
   as_hermes git config --global core.hooksPath "$ORCA_HOOKS"
   local d
-  for d in "$ORCA_WORKDIR" "$STACK_DIR"; do
+  for d in "$ORCA_WORKDIR" "$STACK_DIR" "$HELIOS_SRC"; do
     as_hermes git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$d" \
       || as_hermes git config --global --add safe.directory "$d"
   done
@@ -210,13 +208,12 @@ unit_user() { systemctl show orca -p User --value 2>/dev/null || true; }
 
 # Writes the unit + EnvironmentFile + daemon-reload only. Stop/restart of a live orca
 # (uid 999 → hermes) is migrate, not this function. Callers that would restart (update/pair)
-# must skip when unit_user is still orca. PR8: set_env HERMES_WORKSPACE_DIR /srv/hermes/projects
-# and create that dir before write_service.
+# must skip when unit_user is still orca. The workspace must exist before write_service.
 write_service() {
   case "${DESKTOP_BIND:-}" in
     ""|0.0.0.0|"::"|127.0.0.1) warn "DESKTOP_BIND=${DESKTOP_BIND:-unset}: Orca will advertise that address to its clients. Set it to the Tailscale IP (install.sh does when Tailscale is up)." ;;
   esac
-  [ -d "$ORCA_WORKDIR" ] || die "WorkingDirectory $ORCA_WORKDIR does not exist (PR8 must set_env HERMES_WORKSPACE_DIR /srv/hermes/projects and create it before write_service)"
+  [ -d "$ORCA_WORKDIR" ] || die "WorkingDirectory $ORCA_WORKDIR does not exist (sudo $STACK_DIR/install.sh creates the workspace)"
   install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME"
   install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOOKS"
   cat > "$ORCA_ENV" <<EOF
@@ -269,7 +266,8 @@ print_pairing() {
   writes there; GIT_CONFIG_COUNT overrides repo hooks, not Makefiles / deploy.sh).
   Logins: copies of the agent's (sudo $0 creds), or your own (sudo $0 login claude|codex|grok|gh).
   This stack     : open $STACK_DIR as a project — same uid $ORCA_USER, no POSIX ACLs.
-  Shared projects: $ORCA_WORKDIR is also the agent's /workspace.
+  Shared projects: $ORCA_WORKDIR — same path inside the agent container and in herdr.
+  Worktrees      : $ORCA_WORKDIR/worktrees (Settings → workspace directory; set by migrate-srv-layout.sh)
 MSG
 }
 
@@ -391,9 +389,12 @@ case "${1:-}" in
   pair)     do_pair "${2:-desktop}" ;;
   creds)    id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist: sudo $0 install"; sync_creds ;;
   share)    info "No dedicated orca user — $STACK_DIR needs no POSIX ACLs." ;;
+  # Rewrite /etc/orca.env + orca.service from .env WITHOUT restarting (running sessions keep going;
+  # the new HOME / WorkingDirectory apply at the next restart). Used by migrate-srv-layout.sh.
+  write-service) [ -e "$ORCA_UNIT" ] || die "Orca is not installed"; write_service; info "orca.service rewritten (applies at next restart)" ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
   remove)   do_remove ;;
-  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | login <claude|codex|grok|gh> | status | logs | remove" ;;
+  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | login <claude|codex|grok|gh> | status | logs | remove" ;;
 esac

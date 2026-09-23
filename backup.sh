@@ -10,7 +10,8 @@
 #
 # What is backed up: $HERMES_DATA_DIR (config, auth.json, state.db, memory, skills, CLI creds under
 # home/, plus the consistent `hermes backup` zip under backups/), $HERMES_WORKSPACE_DIR (your files,
-# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env, a fresh
+# minus dependency dirs), $OBSIDIAN_DIR, $TRAEFIK_DIR/acme.json, the stack .env, $HELIOS_DIR (.env +
+# tinyauth state; Helios code is in the workspace), a fresh
 # pg_dumpall of hermes-postgres under $POSTGRES_DIR/dumps and, when Orca is installed on the
 # host, $ORCA_HOME (Orca state, pairings, its copies of the logins).
 # Retention: 7 daily, 4 weekly, 6 monthly; prune runs on Sundays.
@@ -113,6 +114,7 @@ do_run() {
   info "restic backup → $RESTIC_REPOSITORY"
   local paths=("$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env" "$POSTGRES_DIR/dumps")
   [ -d "$ORCA_HOME" ] && paths+=("$ORCA_HOME")
+  [ -d "$HELIOS_DIR" ] && paths+=("$HELIOS_DIR")
   restic_run backup --tag hermes-stack "${EXCLUDES[@]}" "${paths[@]}"
 
   # 4. Retention. Prune (actual deletion, B2 API-call heavy) once a week.
@@ -143,9 +145,15 @@ Restored under $target. To put it back in place with the stack stopped (as root 
   sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
   zcat $POSTGRES_DIR/dumps/pg_dumpall-<latest>.sql.gz | sudo docker exec -i hermes-postgres psql -U $POSTGRES_USER -d postgres   # PostgreSQL data
 $( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R hermes:hermes %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
+$( [ -d "$target$HELIOS_DIR" ] && printf '  sudo rsync -a %s/ %s/ && sudo %s/command-center helios deploy   # Helios .env + tinyauth state\n' "$target$HELIOS_DIR" "$HELIOS_DIR" "$STACK_DIR" )
+  sudo $STACK_DIR/command-center herdr install   # herdr + terminal-code plugin (not backed up: reinstallable)
   sudo rm -rf $target            # it holds every secret in clear
-Pre-cut-over snapshots restore the tree under $target/srv/hermes/workspace/ (restic keeps host paths; there is no workspace→projects symlink). If $target$HERMES_WORKSPACE_DIR is missing, rsync that tree onto $HERMES_WORKSPACE_DIR:
-  sudo rsync -a $target/srv/hermes/workspace/ $HERMES_WORKSPACE_DIR/
+
+Older snapshots use the pre-/srv layout (restic keeps host paths): the workspace is under
+$target/srv/hermes/projects/ (or …/srv/hermes/workspace/ before the single-agent cut-over), Orca under
+$target/srv/hermes/orca/, acme.json under $target/srv/hermes/traefik/, Helios under $target/srv/hermes/helios/.
+If $target$HERMES_WORKSPACE_DIR is missing, rsync the old tree onto $HERMES_WORKSPACE_DIR, e.g.:
+  sudo rsync -a $target/srv/hermes/projects/ $HERMES_WORKSPACE_DIR/
 Alternative (Hermes state only, into a running agent): sudo ./auth.sh shell → hermes import /opt/data/backups/hermes-backup-<ts>.zip
 MSG
 }

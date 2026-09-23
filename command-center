@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Command center — one entry point to deploy and administer every service of the VPS.
+#
+#   /srv/command-center   this repo (scripts, compose, .env)       ← you are here
+#   /srv/hermes           Hermes agent data (data/, obsidian/, postgres/)
+#   /srv/orca             Orca HOME (orca.service, on the host)
+#   /srv/helios           Helios deployment (.env, tinyauth state); code in the workspace
+#   /srv/workspace        shared projects — same path for the agent, Orca, herdr and SSH
+#
+#   sudo command-center                       # interactive menu
+#   sudo command-center status                # everything at a glance
+#   sudo command-center deploy <all|hermes|orca|helios|herdr>   # one-click (idempotent) deploys
+#   sudo command-center hermes <auth|agent|update|rollback|backup|logs|shell|chat|restart|ps> [args…]
+#   sudo command-center orca   <install|update|pair|creds|login|status|logs|…>   (orca.sh)
+#   sudo command-center helios <deploy|status|ps|logs|down|restart>              (helios.sh)
+#   sudo command-center herdr  <install|update|creds|login|status|logs|restart>  (herdr.sh)
+#   sudo command-center workspace [status|fix]   # tree, ownership, /workspace link, context files
+#   sudo command-center migrate [--dry-run] | finalize   # pre-/srv install → this layout
+#   sudo command-center backup <run|snapshots|…> · update · harden   (backup.sh / update.sh / harden.sh)
+set -euo pipefail
+
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+cd "$STACK_DIR"
+
+run() { local s="$1"; shift; exec "$STACK_DIR/$s" "$@"; }
+sub() { local s="$1"; shift; "$STACK_DIR/$s" "$@"; }
+
+# ── status ──────────────────────────────────────────────────────────────
+line() { printf '  %-12s %s\n' "$1" "$2"; }
+svc_state() { systemctl is-active "$1" 2>/dev/null || true; }
+
+do_status() {
+  need_root; load_env
+  echo "── /srv layout ──"
+  local d
+  for d in command-center hermes orca helios workspace; do
+    if [ -L "$SRV_ROOT/$d" ]; then line "$d" "SYMLINK → $(readlink "$SRV_ROOT/$d") (unexpected)"
+    elif [ -d "$SRV_ROOT/$d" ]; then line "$d" "$(stat -c '%U:%G %a' "$SRV_ROOT/$d")  $(du -sh --apparent-size "$SRV_ROOT/$d" 2>/dev/null | cut -f1 || true)"
+    else line "$d" "missing"; fi
+  done
+  local compat=()
+  for d in stack orca projects helios traefik; do [ -L "$SRV_ROOT/hermes/$d" ] && compat+=("hermes/$d"); done
+  [ "${#compat[@]}" -eq 0 ] || line "compat" "${compat[*]} → still linked (pending: sudo command-center migrate finalize)"
+  [ -L /workspace ] && line "/workspace" "→ $(readlink /workspace)"
+
+  echo; echo "── hermes (platform + agent, compose project command-center) ──"
+  compose ps --format '  {{.Name}}\t{{.Status}}' 2>/dev/null || echo "  compose unavailable"
+  [ -e "$MAINTENANCE_FLAG" ] && echo "  .maintenance present: heal.sh paused"
+  [ -e "$UPDATE_HOLD" ] && echo "  .update-hold present: weekly update paused"
+  line "dashboard" "https://${HERMES_HOST:-?}  (tailnet)"
+  line "timers" "$(systemctl list-timers 'hermes-*' --all --no-pager --no-legend 2>/dev/null | grep -o 'hermes-[a-z]*\.timer' | tr '\n' ' ')"
+
+  echo; echo "── orca (host) ──"
+  if [ -e /opt/orca/current ]; then
+    line "service" "$(svc_state orca) · $(cat /opt/orca/current/VERSION 2>/dev/null) · HOME=$(sed -n 's/^HOME=//p' /etc/orca.env 2>/dev/null) · cwd $(systemctl show orca -p WorkingDirectory --value 2>/dev/null)"
+    [ "$(sed -n 's/^HOME=//p' /etc/orca.env 2>/dev/null)" = "$ORCA_HOME" ] || echo "  /etc/orca.env HOME differs from ORCA_HOME=$ORCA_HOME — sudo command-center migrate finalize"
+  else line "service" "not installed (command-center deploy orca)"; fi
+
+  echo; echo "── helios ──"
+  { "$STACK_DIR/helios.sh" status 2>/dev/null || echo "(helios.sh status failed)"; } | sed 's/^/  /'
+
+  echo; echo "── herdr ──"
+  { "$STACK_DIR/herdr.sh" status 2>/dev/null || echo "(herdr.sh status failed)"; } | sed -n '1,4s/^/  /p'
+
+  echo; echo "── workspace ──"
+  workspace_status | sed 's/^/  /'
+}
+
+# ── workspace ───────────────────────────────────────────────────────────
+workspace_status() {
+  local w="$HERMES_WORKSPACE_DIR" r
+  echo "$w  owner $(stat -c '%U:%G' "$w" 2>/dev/null || echo '?')  (agent sees the same path; /workspace = alias)"
+  for r in HERMES.md AGENTS.md CLAUDE.md; do [ -e "$w/$r" ] && printf '%s ' "$r"; done; echo "(context files)"
+  echo "repos: $(find "$w/projects" -mindepth 2 -maxdepth 2 -name .git -printf '%h\n' 2>/dev/null | sed 's|.*/||' | sort | tr '\n' ' ')"
+  local foreign; foreign="$(find "$w" -xdev -maxdepth 3 \! -user "$HERMES_UID" -printf '%p (%u)\n' 2>/dev/null | head -n 5)"
+  [ -z "$foreign" ] || { echo "not owned by uid $HERMES_UID (fix: command-center workspace fix):"; echo "$foreign" | sed 's/^/  /'; }
+  if docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null | grep -q true; then
+    agent_run sh -c 'test -w "$WORKSPACE_DIR" && echo "agent container: $WORKSPACE_DIR writable as $(id -un)" || echo "agent container: $WORKSPACE_DIR NOT writable"' 2>/dev/null || true
+  fi
+}
+
+do_workspace() {
+  need_root; load_env
+  case "${1:-status}" in
+    status) workspace_status ;;
+    fix)
+      ensure_workspace
+      info "chown -R $HERMES_UID:$HERMES_GID $HERMES_WORKSPACE_DIR (one owner for the host user and the agent)"
+      chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_WORKSPACE_DIR"
+      CUTOVER=1 "$STACK_DIR/agent.sh" sync-files >/dev/null && info "context files (HERMES.md, AGENTS.md, CLAUDE.md) refreshed"
+      workspace_status ;;
+    *) die "usage: command-center workspace [status|fix]" ;;
+  esac
+}
+
+# ── hermes ──────────────────────────────────────────────────────────────
+do_hermes() {
+  local c="${1:-status}"; [ $# -gt 0 ] && shift
+  case "$c" in
+    deploy|install) run install.sh "$@" ;;
+    auth)     run auth.sh "$@" ;;
+    shell)    run auth.sh shell ;;
+    chat)     run auth.sh chat "$@" ;;
+    status)   sub auth.sh status; sub agent.sh status ;;
+    agent)    run agent.sh "$@" ;;
+    sync)     CUTOVER=1 run agent.sh sync "$@" ;;
+    update)   run update.sh "$@" ;;
+    rollback) run update.sh rollback ;;
+    backup)   run backup.sh "$@" ;;
+    heal)     run heal.sh ;;
+    restart)  need_root; load_env; restart_agent ;;
+    ps)       compose ps ;;
+    logs)     compose logs -f --tail=100 "${@:-hermes-agent}" ;;
+    *) die "usage: command-center hermes <deploy|auth|shell|chat|status|agent|sync|update|rollback|backup|heal|restart|ps|logs>" ;;
+  esac
+}
+
+# ── deploy (one click) ──────────────────────────────────────────────────
+do_deploy() {
+  need_root
+  case "${1:-}" in
+    hermes) sub install.sh ;;
+    orca)   if [ -e /opt/orca/current ]; then sub orca.sh update; else sub orca.sh install; fi ;;
+    helios) sub helios.sh deploy ;;
+    herdr)  sub herdr.sh install ;;
+    all)
+      sub install.sh
+      if [ -e /opt/orca/current ]; then sub orca.sh update; else sub orca.sh install; fi
+      load_env
+      if [ -f "$HELIOS_DIR/.env" ]; then sub helios.sh deploy; else warn "helios skipped: $HELIOS_DIR/.env missing"; fi
+      sub herdr.sh install ;;
+    *) die "usage: command-center deploy <all|hermes|orca|helios|herdr>" ;;
+  esac
+}
+
+# ── menu ────────────────────────────────────────────────────────────────
+menu() {
+  need_root
+  cat <<'MENU'
+
+  Command center — /srv
+   1) status            everything at a glance
+   2) deploy all        platform + Hermes, Orca, Helios, herdr (idempotent)
+   3) deploy hermes     platform + Hermes agent (install.sh)
+   4) deploy orca       install / update Orca on the host
+   5) deploy helios     build + restart Helios from /srv/workspace/projects/helios
+   6) deploy herdr      herdr + terminal-code plugin + herdr.service
+   7) hermes auth       logins (Hermes model, claude/codex/grok, gh, messaging, obsidian)
+   8) hermes shell      shell in the agent container
+   9) hermes sync       re-sync SOUL / skills / MCP / workspace context from this repo
+  10) orca pair         pairing link for the desktop or mobile app
+  11) herdr creds       copy the agent's CLI logins for herdr / SSH sessions
+  12) workspace fix     ownership + /workspace link + context files
+  13) backup run        restic backup to B2 now
+  14) update            weekly update now (images, CLIs, Orca, herdr)
+   q) quit
+MENU
+  local c; read -r -p "> " c
+  case "$c" in
+    1) do_status ;; 2) do_deploy all ;; 3) do_deploy hermes ;; 4) do_deploy orca ;;
+    5) do_deploy helios ;; 6) do_deploy herdr ;; 7) sub auth.sh ;; 8) sub auth.sh shell ;;
+    9) CUTOVER=1 sub agent.sh sync ;; 10) read -r -p "desktop or mobile? " m; sub orca.sh pair "${m:-desktop}" ;;
+    11) sub herdr.sh creds ;; 12) do_workspace fix ;; 13) sub backup.sh run ;; 14) sub update.sh ;;
+    q|Q) exit 0 ;; *) warn "unknown choice: $c" ;;
+  esac
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  "")        while true; do menu; done ;;
+  status)    do_status ;;
+  deploy)    do_deploy "$@" ;;
+  hermes)    do_hermes "$@" ;;
+  orca)      run orca.sh "$@" ;;
+  helios)    run helios.sh "$@" ;;
+  herdr)     run herdr.sh "$@" ;;
+  workspace) do_workspace "$@" ;;
+  migrate)   run migrate-srv-layout.sh "$@" ;;
+  backup)    run backup.sh "$@" ;;
+  update)    run update.sh "$@" ;;
+  harden)    run harden.sh "$@" ;;
+  auth)      run auth.sh "$@" ;;
+  -h|--help|help) sed -n '2,21p' "$(readlink -f "$0")" ;;
+  *) die "unknown command: $cmd (command-center help)" ;;
+esac

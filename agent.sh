@@ -108,6 +108,25 @@ sync_config() {
 
 # ── sync-files (host only) ─────────────────────────────────────────────
 
+# Workspace root context, distribution-owned like SOUL.md (always overwritten):
+#   HERMES.md  → read by Hermes (first context file it finds from its cwd)
+#   AGENTS.md  → read by Codex / Grok / any agent started in the workspace (Orca, herdr, SSH)
+#   CLAUDE.md  → symlink to AGENTS.md for Claude Code
+# Project repos keep their own AGENTS.md; these only describe the shared tree and the rules.
+sync_workspace_context() {
+  local w="$HERMES_WORKSPACE_DIR"
+  [ -d "$w" ] || { warn "  workspace $w missing — skip HERMES.md / AGENTS.md"; return 0; }
+  no_symlink "$w/HERMES.md" "$w/AGENTS.md"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/HERMES.md" "$w/HERMES.md"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/WORKSPACE.md" "$w/AGENTS.md"
+  if [ ! -e "$w/CLAUDE.md" ] || [ -L "$w/CLAUDE.md" ]; then
+    ln -sfn AGENTS.md "$w/CLAUDE.md"; chown -h "$HERMES_UID:$HERMES_GID" "$w/CLAUDE.md"
+  else
+    warn "  $w/CLAUDE.md is a regular file — left alone (expected: symlink → AGENTS.md)"
+  fi
+  info "  workspace context: $w/{HERMES.md,AGENTS.md,CLAUDE.md}"
+}
+
 do_sync_files() {
   require_cutover
   require_rsync
@@ -115,6 +134,7 @@ do_sync_files() {
   no_symlink "$HERMES_DATA_DIR"
   [ -d "$STACK_DIR/skills" ] || die "missing $STACK_DIR/skills"
   [ -f "$STACK_DIR/agent/SOUL.md" ] || die "missing $STACK_DIR/agent/SOUL.md"
+  [ -f "$STACK_DIR/agent/HERMES.md" ] && [ -f "$STACK_DIR/agent/WORKSPACE.md" ] || die "missing $STACK_DIR/agent/HERMES.md or WORKSPACE.md"
 
   info "sync-files → $HERMES_DATA_DIR"
   mkdir -p "$HERMES_DATA_DIR/skills" "$HERMES_DATA_DIR/mcp-src" "$HERMES_DATA_DIR/.hub-lock"
@@ -131,6 +151,8 @@ do_sync_files() {
   no_symlink "$HERMES_DATA_DIR/SOUL.md"
   install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/SOUL.md" "$HERMES_DATA_DIR/SOUL.md"
   info "  SOUL.md"
+
+  sync_workspace_context
 
   no_symlink "$HERMES_DATA_DIR/.no-bundled-skills"
   install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/.no-bundled-skills" "$HERMES_DATA_DIR/.no-bundled-skills"
@@ -233,7 +255,7 @@ run_setup() {
   fi
   warn "compose exec failed, falling back to compose run --entrypoint bash"
   compose run --rm --no-deps --entrypoint bash \
-    -u "$HERMES_UID:$HERMES_GID" -e HOME=/opt/data/home -w /workspace hermes-agent \
+    -u "$HERMES_UID:$HERMES_GID" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent \
     -lc 'PROFILE_DIR=/opt/data DIST_DIR=/opt/data/mcp-src bash /opt/data/mcp-src/setup.sh' \
     || die "setup.sh failed"
 }
@@ -272,6 +294,8 @@ do_diff() {
       echo "  + $f (live only)"
     fi
   done
+  [ -f "$HERMES_WORKSPACE_DIR/HERMES.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/HERMES.md" "$STACK_DIR/agent/HERMES.md" >/dev/null && echo "  M workspace HERMES.md"
+  [ -f "$HERMES_WORKSPACE_DIR/AGENTS.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/AGENTS.md" "$STACK_DIR/agent/WORKSPACE.md" >/dev/null && echo "  M workspace AGENTS.md"
   if [ -d "$live/skills" ]; then
     rsync -rlt -n -i -m -O -c --delete --exclude '/.hub/' "${SKILL_EXCLUDES[@]}" \
       "$STACK_DIR/skills/" "$live/skills/" | sed 's/^/  skills: /'
