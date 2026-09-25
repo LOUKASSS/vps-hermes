@@ -136,6 +136,29 @@ MAINTENANCE_FLAG="$STACK_DIR/.maintenance"
 # shellcheck disable=SC2034
 UPDATE_HOLD="$STACK_DIR/.update-hold"
 
+# notify <text> — optional push for unattended runs, to either or both of:
+#   UPDATE_NOTIFY_HERMES  a `hermes send` target (telegram = its home channel, telegram:<chat_id>,
+#                         discord:#ops…): the Hermes agent delivers it with the gateway's bot
+#                         credentials — no LLM call; skipped while hermes-agent is not running
+#   UPDATE_NOTIFY_URL     a Discord webhook gets {"content": …}, any other URL (ntfy.sh/<topic>, …)
+#                         the plain text as the POST body.
+# Never fails the caller.
+notify() {
+  local url="${UPDATE_NOTIFY_URL:-}" target="${UPDATE_NOTIFY_HERMES:-}" msg
+  msg="[$(hostname)] $*"
+  if [ -n "$target" ] && [ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" = true ]; then
+    timeout 60 docker exec -u "${HERMES_UID:-1000}:${HERMES_GID:-1000}" -e HOME=/opt/data/home hermes-agent \
+      hermes send -q --to "$target" "$msg" >/dev/null 2>&1 || warn "notify: hermes send --to $target failed"
+  fi
+  [ -n "$url" ] || return 0
+  case "$url" in
+    https://discord.com/api/webhooks/*|https://discordapp.com/api/webhooks/*)
+      python3 -c 'import json, sys; print(json.dumps({"content": sys.argv[1][:1900]}))' "$msg" \
+        | curl -fsS -m 15 -H 'Content-Type: application/json' --data-binary @- "$url" >/dev/null 2>&1 || true ;;
+    *) curl -fsS -m 15 --data-binary "$msg" "$url" >/dev/null 2>&1 || true ;;
+  esac
+}
+
 # Resolve ORCA_VERSION=latest to the current release tag (GitHub API) and export it, so orca.sh
 # installs/updates only when the tag differs from the installed one. Silently keeps "latest" when
 # GitHub is unreachable (orca.sh then downloads the latest asset and reads the tag from its manifest).
@@ -208,7 +231,7 @@ obsidian_exec() {
 # path inside the container so snapshot paths match the host. RESTIC_* / B2_* come from .env.
 #   restic_run [--rw <hostdir>] <restic args…>     (--rw mounts <hostdir> at /restore, writable)
 restic_run() {
-  local tty=() rw=() orca=() helios=()
+  local tty=() rw=() orca=() helios=() discord=()
   # -t only when stdout is a terminal too: under a pty docker merges restic's stderr into
   # stdout, so a caller capturing stderr ($(… 2>&1 >/dev/null)) would get nothing.
   [ -t 0 ] && [ -t 1 ] && tty=(-it)
@@ -225,17 +248,28 @@ restic_run() {
     -v "$TRAEFIK_DIR:$TRAEFIK_DIR:ro" \
     -v "$OBSIDIAN_DIR:$OBSIDIAN_DIR:ro" \
     -v "$POSTGRES_DIR/dumps:$POSTGRES_DIR/dumps:ro" \
-    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" "${helios[@]}" \
+    -v "$STACK_DIR/.env:$STACK_DIR/.env:ro" "${orca[@]}" "${helios[@]}" "${discord[@]}" \
     "$RESTIC_IMAGE" "$@"
 }
 
 # Recreate hermes-agent (new /opt/data/.env, new image…). Holds UPDATE_LOCK so heal.sh (every
 # minute) does not "repair" it mid-recreate. The lock stays with the calling script until it
 # exits (fd 8) — fine, these are short-lived commands.
+# From a terminal, asks first when Hermes is working (the recreate cuts it); heal.sh (no terminal,
+# container already sick) does not wait. The Hermes CLIs of herdr are resumed afterwards.
 restart_agent() {
   [ "${UPDATE_LOCKED:-}" = 1 ] || lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
+  local busy a
+  if [ -t 0 ] && busy="$(hermes_busy)" && [ -n "$busy" ]; then
+    warn "Hermes is working — recreating hermes-agent cuts it:"
+    printf '%s\n' "$busy" | sed 's/^/  /' >&2
+    read -r -p "Recreate hermes-agent anyway? [y/N] " a
+    case "$a" in [yY]*) ;; *) die "cancelled — hermes-agent left running" ;; esac
+  fi
+  hermes_panes_snapshot
   compose up -d --force-recreate hermes-agent
   wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
+  hermes_sessions_restore
 }
 
 # wait_healthy <container> <seconds>
@@ -248,3 +282,7 @@ wait_healthy() {
   done
   return 1
 }
+
+# Hermes work / herdr sessions around a recreate of hermes-agent (update.sh, restart_agent).
+# shellcheck source=lib/agent-sessions.sh
+. "$STACK_DIR/lib/agent-sessions.sh"

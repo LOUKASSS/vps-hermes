@@ -193,13 +193,15 @@ case "$_code" in
   *) warn "dashboard login could not be verified (HTTP $_code)"; dash_login="$dash_login — unverified" ;;
 esac
 
-# ── 6. systemd timers: weekly update, nightly backup (enabled once backup.sh setup ran) ──
+# ── 6. systemd timers (nightly update, nightly backup once backup.sh setup ran) + CLIs on PATH ──
 if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
   for unit in "$STACK_DIR"/systemd/*; do
     sed "s|@STACK_DIR@|$STACK_DIR|g" "$unit" > "/etc/systemd/system/$(basename "$unit")"
   done
   docker_wait_for_tailscale   # ports bind DESKTOP_BIND: dockerd must not start before tailscaled has the IP
   systemctl daemon-reload
+  ln -sfn "$STACK_DIR/command-center" /usr/local/bin/command-center
+  ln -sfn "$STACK_DIR/bin/hermes" /usr/local/bin/hermes   # host `hermes` → CLI in hermes-agent
   systemctl enable --now hermes-update.timer hermes-heal.timer >/dev/null
   if [ -n "$(env_val B2_ACCOUNT_KEY)" ] && [ -n "$(env_val RESTIC_PASSWORD)" ]; then
     systemctl enable --now hermes-backup.timer >/dev/null
@@ -225,7 +227,7 @@ cat <<MSG
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials, skills, private/)
   Workspace     : ${HERMES_WORKSPACE_DIR}   (same path in the agent, Orca, herdr; /workspace = alias)
   Backups       : ${backup_note}
-  Updates       : weekly, Sunday 03:30 (hermes-update.timer) — pull + agent/CLI rebuild; undo: sudo ./update.sh rollback
+  Updates       : nightly, 04:00 (hermes-update.timer) — images + CLIs, tested first, auto-rollback; undo: sudo ./update.sh rollback
   Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited; touch .maintenance to pause)
 
   These secrets are also in .env (mode 600). Clear this terminal's scrollback if it is shared or logged.

@@ -6,16 +6,17 @@
 # the container writes /srv/hermes/data/home as uid hermes, and a dotfile planted there
 # (~/.claude/settings.json hooks, ~/.gitconfig core.hooksPath, ~/.codex/config.toml MCP commands)
 # would run as a sudoer the next time an Orca session touched it. Only the credential FILES of the
-# agent's claude / codex / grok / gh logins are copied over (`orca.sh creds`); config files never
-# are. Sessions cwd is HERMES_WORKSPACE_DIR (/srv/workspace, same path inside the agent). Repo
+# agent's grok / gh logins are copied over (`orca.sh creds`); config files never are. Claude and
+# Codex need their own login here (`orca.sh login claude|codex`): see sync_creds. Sessions cwd is HERMES_WORKSPACE_DIR (/srv/workspace, same path inside the agent). Repo
 # hooks in that tree are overridden by GIT_CONFIG_COUNT (git -c rank); treat the workspace as untrusted
 # for sudo (Makefiles / deploy.sh = accepted residual risk). No dedicated `orca` user.
 #
 #   sudo ./orca.sh install            # hermes HOME, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
-#   sudo ./orca.sh update [--force]   # new release? download, verify, switch (previous kept), restart
+#   sudo ./orca.sh update [--force]   # CLIs (rolled back if one no longer starts) + new release? download,
+#                                     # verify, switch (previous kept), restart — back to previous if it does not come up
 #   sudo ./orca.sh rollback           # back to the previous release
 #   sudo ./orca.sh pair [desktop|mobile]   # restart + print the pairing link / mobile QR
-#   sudo ./orca.sh creds              # re-copy the agent's login files into ORCA_HOME (after auth.sh)
+#   sudo ./orca.sh creds              # re-copy the agent's grok / gh login files into ORCA_HOME (after auth.sh)
 #   sudo ./orca.sh share              # no-op (same uid as the stack; no POSIX ACLs)
 #   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as hermes in ORCA_HOME (separate from the agent)
 #   sudo ./orca.sh status | logs | remove
@@ -90,12 +91,15 @@ ensure_gitconfig() {
 }
 
 # Copy the agent's credential files (auth.sh logins) into ORCA_HOME — data only, never a config
-# file. Symlinks in the container-controlled source are skipped. Both sides refresh their tokens
-# independently; if one side ever logs out, `orca.sh creds` again or `orca.sh login <cli>`.
+# file. Symlinks in the container-controlled source are skipped. Claude and Codex OAuth rotate a
+# single-use refresh token: two copies of one login refresh independently, the second refresh
+# presents a spent token and that login is revoked (on both sides, when the server treats it as
+# reuse). Those two are never copied — `orca.sh login claude|codex` gives Orca its own login.
 CRED_FILES=(.claude/.credentials.json .codex/auth.json .grok/auth.json .config/gh/hosts.yml)
+COPY_CRED_FILES=(.grok/auth.json .config/gh/hosts.yml)
 sync_creds() {
   local f src dst n=0 missing=()
-  for f in "${CRED_FILES[@]}"; do
+  for f in "${COPY_CRED_FILES[@]}"; do
     src="$AGENT_HOME/$f"; dst="$ORCA_HOME/$f"
     if [ -f "$src" ] && [ ! -L "$src" ]; then
       install -D -m 0600 -o "$ORCA_USER" -g "$ORCA_USER" "$src" "$dst"; n=$((n + 1))
@@ -105,6 +109,9 @@ sync_creds() {
   done
   chown -R "$ORCA_USER:$ORCA_USER" "$ORCA_HOME/.claude" "$ORCA_HOME/.codex" "$ORCA_HOME/.grok" "$ORCA_HOME/.config" 2>/dev/null || true
   info "Copied $n login file(s) from $AGENT_HOME to $ORCA_HOME${missing[*]:+ (not logged in on the agent: ${missing[*]})}"
+  for f in .claude/.credentials.json .codex/auth.json; do
+    [ -f "$ORCA_HOME/$f" ] || info "  ${f%%/*}: not copied (rotating OAuth) — own login: sudo $0 login $(basename "${f%%/*}" | tr -d .)"
+  done
 }
 
 # Run a command as hermes with a clean environment. env -i drops GIT_CONFIG_* unless we pass them.
@@ -151,14 +158,50 @@ install_deps() {
   install_clis
 }
 
-# Same set and flags as hermes/Dockerfile; global under /usr/local (npm prefix), on PATH for the service.
+CLI_PKGS=(@anthropic-ai/claude-code @openai/codex @xai-official/grok)
+
+# install_clis [pkg@version…] — default: the latest of each. Same set and flags as hermes/Dockerfile;
+# global under the npm prefix, on PATH for the service.
 install_clis() {
-  info "Installing/updating claude, codex, grok CLIs (npm -g)…"
+  local -a specs=("$@")
+  [ "${#specs[@]}" -gt 0 ] || specs=("${CLI_PKGS[@]}")
+  info "Installing/updating claude, codex, grok CLIs (npm -g${1:+: $*})…"
   npm install -g --no-audit --no-fund --fetch-retries=5 \
     --allow-scripts=@anthropic-ai/claude-code,@xai-official/grok \
-    @anthropic-ai/claude-code @openai/codex @xai-official/grok >/dev/null
+    "${specs[@]}" >/dev/null || return 1
   npm cache clean --force >/dev/null 2>&1 || true
   echo "  $(claude --version 2>/dev/null | head -n1) · codex $(codex --version 2>/dev/null | head -n1) · $(grok --version 2>/dev/null | head -n1) · $(gh --version | head -n1)"
+}
+
+# Installed CLI_PKGS as pkg@version, one per line.
+cli_versions() {
+  npm ls -g --depth=0 --json 2>/dev/null | python3 -c 'import json, sys
+deps = json.load(sys.stdin).get("dependencies", {})
+for p in sys.argv[1:]:
+    if p in deps: print(p + "@" + deps[p]["version"])' "${CLI_PKGS[@]}"
+}
+# Every CLI starts for the user the sessions run as.
+cli_smoke() {
+  local c
+  for c in claude codex grok; do
+    as_hermes timeout 60 "$c" --version >/dev/null 2>&1 || { warn "$c --version fails"; return 1; }
+  done
+}
+
+# Nightly (update.sh → do_update): the newest CLIs, or back to the versions that were installed
+# when one of them no longer starts (sessions already running keep the binary they loaded).
+update_clis() {
+  local -a before=()
+  mapfile -t before < <(cli_versions)
+  if install_clis && cli_smoke; then return 0; fi
+  [ "${#before[@]}" -gt 0 ] || { notify "orca.sh: coding CLI update failed and no previous versions were recorded"; return 1; }
+  warn "coding CLIs broken after the update → reinstalling ${before[*]}"
+  if install_clis "${before[@]}" && cli_smoke; then
+    notify "orca.sh: host coding CLI update failed — rolled back to ${before[*]}"
+    return 0
+  fi
+  notify "orca.sh: host coding CLIs broken, and reinstalling ${before[*]} did not fix them"
+  return 1
 }
 
 # ── release download: verify sha512 from the electron-builder manifest, extract (no FUSE) ──
@@ -264,7 +307,8 @@ print_pairing() {
   Sessions run as user $ORCA_USER (HOME=$ORCA_HOME, cwd $ORCA_WORKDIR) with docker and sudo — this being
   the host. Treat the link like a root password. Treat $ORCA_WORKDIR as untrusted for sudo (the agent
   writes there; GIT_CONFIG_COUNT overrides repo hooks, not Makefiles / deploy.sh).
-  Logins: copies of the agent's (sudo $0 creds), or your own (sudo $0 login claude|codex|grok|gh).
+  Logins: claude / codex = your own (sudo $0 login claude|codex); grok / gh = copies of the agent's
+  (sudo $0 creds) or your own (sudo $0 login grok|gh).
   This stack     : open $STACK_DIR as a project — same uid $ORCA_USER, no POSIX ACLs.
   Shared projects: $ORCA_WORKDIR — same path inside the agent container and in herdr.
   Worktrees      : $ORCA_WORKDIR/worktrees (Settings → workspace directory; set by migrate-srv-layout.sh)
@@ -307,7 +351,7 @@ do_update() {
     return 0
   fi
   [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
-  install_clis
+  update_clis || warn "coding CLIs: update failed (see above)"
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -323,14 +367,19 @@ do_update() {
     return 0
   fi
   write_service
-  restart_and_pair
+  # A release that does not come up goes straight back to the one that did (and holds updates).
+  if ! (restart_and_pair); then
+    warn "Orca $FETCHED_TAG does not come up → back to $cur"
+    notify "orca.sh: Orca $FETCHED_TAG did not start — rolled back to $cur, Orca updates on hold (sudo $0 update --force)"
+    do_rollback
+  fi
 }
 
 do_rollback() {
   [ -e "$ORCA_ROOT/previous" ] || die "no previous Orca release kept"
   local prev cur; prev="$(readlink -f "$ORCA_ROOT/previous")"; cur="$(readlink -f "$ORCA_ROOT/current")"
   ln -sfn "$cur" "$ORCA_ROOT/previous"; ln -sfn "$prev" "$ORCA_ROOT/current"
-  date -Is > "$ORCA_ROOT/.hold"   # the weekly update.sh → orca.sh update must not re-activate $cur
+  date -Is > "$ORCA_ROOT/.hold"   # the nightly update.sh → orca.sh update must not re-activate $cur
   info "Orca: $(basename "$cur") → $(basename "$prev") — updates on hold until: sudo $0 update --force"
   restart_and_pair
 }

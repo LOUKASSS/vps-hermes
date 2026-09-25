@@ -49,7 +49,9 @@ do_status() {
   echo; echo "── hermes (platform + agent, compose project command-center) ──"
   compose ps --format '  {{.Name}}\t{{.Status}}' 2>/dev/null || echo "  compose unavailable"
   [ -e "$MAINTENANCE_FLAG" ] && echo "  .maintenance present: heal.sh paused"
-  [ -e "$UPDATE_HOLD" ] && echo "  .update-hold present: weekly update paused"
+  [ -e "$UPDATE_HOLD" ] && echo "  .update-hold present: nightly update paused (sudo command-center update resume)"
+  [ -s "$STACK_DIR/state/last-update" ] && line "last update" "$(cat "$STACK_DIR/state/last-update")"
+  [ -s "$STACK_DIR/.update-failed" ] && line "skipped" "$(wc -l < "$STACK_DIR/.update-failed") failed version(s) in .update-failed (retry: update --force)"
   line "dashboard" "https://${HERMES_HOST:-?}  (tailnet)"
   line "timers" "$(systemctl list-timers 'hermes-*' --all --no-pager --no-legend 2>/dev/null | grep -o 'hermes-[a-z]*\.timer' | tr '\n' ' ')"
 
@@ -162,7 +164,7 @@ menu() {
   11) herdr creds       copy the agent's CLI logins for herdr / SSH sessions
   12) workspace fix     ownership + /workspace link + context files
   13) backup run        restic backup to B2 now
-  14) update            weekly update now (images, CLIs, Orca, herdr)
+  14) update            update now (images, CLIs, Orca, herdr; tested, auto-rollback)
   15) discord-backup    status of the Discord backup bot (archives, verification)
    q) quit
 MENU

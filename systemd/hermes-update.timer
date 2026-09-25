@@ -1,9 +1,10 @@
 [Unit]
-Description=Weekly Hermes stack update (Sunday 03:30, after the 03:00 backup; unattended-upgrades reboots at 02:00 when needed)
+Description=Nightly Hermes stack update, 04:00 (images + coding CLIs, tested before the swap, auto-rollback; after the 02:00 reboot window and the 03:00 backup)
 
 [Timer]
-OnCalendar=Sun *-*-* 03:30:00
-Persistent=true
+OnCalendar=*-*-* 04:00:00
+# No catch-up after downtime: a missed night is simply done the next night, never in the daytime.
+Persistent=false
 
 [Install]
 WantedBy=timers.target
