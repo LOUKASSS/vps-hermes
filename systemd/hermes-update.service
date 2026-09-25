@@ -1,5 +1,5 @@
 [Unit]
-Description=Hermes stack update (pull public images, agent/CLI rebuild, recreate; auto-rollback if unhealthy)
+Description=Hermes stack update (build + smoke-test candidate, pull, recreate only what changed; auto-rollback if unhealthy)
 After=docker.service network-online.target
 Wants=network-online.target
 

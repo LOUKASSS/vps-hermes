@@ -5,7 +5,7 @@ dans ta SOUL ; ici, les faits.
 
 Conteneur `hermes-agent`, utilisateur `hermes` (uid 1000). Pas de root, pas de sudo, pas de Docker.
 Persistant : `/opt/data` (ton HERMES_HOME, hôte `/srv/hermes/data`) et `/srv/workspace`. Le reste
-est perdu à la mise à jour de l'image (dimanche 03:30).
+est perdu à la mise à jour de l'image (chaque nuit à 04:00, quand une nouvelle version sort).
 
 Binaire : `hermes` (sur le PATH). Ne jamais éditer `/opt/data/.env`, `config.yaml`, `auth.json`
 sans demande explicite. Un seul agent, une SOUL, des skills — pas de profiles.

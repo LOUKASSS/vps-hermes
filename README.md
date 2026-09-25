@@ -11,7 +11,7 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
 - **Helios** — the personal dashboard (tinyauth + nginx + fitness collector), its own compose project;
 - **herdr** — [herdr](https://herdr.dev) terminal workspace for coding agents on the host, with the
   [terminal-code](https://github.com/zenbu-labs/terminal-code) plugin (VS Code in the terminal);
-- platform: tailnet-only Traefik + DNS, nightly encrypted backups to Backblaze B2, weekly updates,
+- platform: tailnet-only Traefik + DNS, nightly encrypted backups to Backblaze B2, nightly tested updates with automatic rollback,
   a self-healing timer.
 
 ```
@@ -49,7 +49,9 @@ Tailnet ──22────▶ sshd → `herdr` attaches to herdr.service (User
 Three HOMEs, one uid: `/home/hermes` (SSH + herdr), `/srv/orca` (Orca), `/srv/hermes/data/home`
 (agent tools). Coding CLIs (`claude` / `codex` / `grok`) are installed both in the agent image
 and on the host when Orca is installed; their credentials remain separate (only credential
-files are ever copied between HOMEs: `orca.sh creds`, `herdr.sh creds`). DNS and Obsidian use
+files are ever copied between HOMEs: `orca.sh creds`, `herdr.sh creds` — grok and gh only; Claude
+and Codex rotate a single-use refresh token, so a copied login gets revoked on its first refresh
+and each HOME logs in on its own). DNS and Obsidian use
 public images (`4km3/dnsmasq:2.90-r3`, `node:22-bookworm-slim`).
 
 ## Command center (`command-center`)
@@ -101,15 +103,15 @@ what `projects/helios` contains — review the diff before deploying.
   and the herdr integrations for `claude`, `codex`, `grok` (session restore);
 - runs `herdr server` as **`herdr.service`** (`User=hermes`, `HOME=/home/hermes`, `MemoryMax=HERDR_MEM_LIMIT`):
   panes survive SSH disconnects and client detaches, and come back after a reboot;
-- copies the agent's CLI login files into `/home/hermes` when absent (`herdr.sh creds` to refresh,
-  `herdr.sh login claude|codex|grok|gh` for separate accounts) and adds a `~/.bashrc` block
+- copies the agent's grok / gh login files into `/home/hermes` when absent (`herdr.sh creds` to
+  refresh); Claude and Codex need `herdr.sh login claude|codex` (rotating refresh tokens) and adds a `~/.bashrc` block
   (`PATH`, `$WORKSPACE`, `ws`, SSH logins land in the workspace).
 
 Use it: `ssh hermes@<tailscale-ip>` → `herdr` (detach `ctrl+b q`), or from a laptop with herdr:
 `herdr --remote hermes@<tailscale-ip>`. VS Code in a pane: `tode` (or the plugin action
 *Open terminal-code (right split)*); it needs a terminal with the kitty graphics protocol
-(Ghostty, kitty, WezTerm) — run `tode --shortcut-setup` once. The weekly `update.sh` runs
-`herdr.sh update` (new binary + `tode --upgrade`; the running server keeps its panes until
+(Ghostty, kitty, WezTerm) — run `tode --shortcut-setup` once. The nightly `update.sh` runs
+`herdr.sh update` (new binary + `tode --upgrade`, previous binary restored if the new one does not start; the running server keeps its panes until
 `sudo command-center herdr restart`).
 
 ## Helios
@@ -213,7 +215,7 @@ What it does:
   `ssh -i ~/.ssh/hermes_vps hermes@<tailscale-ip>` works from another terminal;
 - then **sshd** hardening: keys only, no root, `AllowUsers hermes`, `MaxAuthTries 3`;
 - **unattended-upgrades** (security + updates + Docker/Tailscale repos), unused-package cleanup,
-  automatic reboot at 02:00 when required (before the 03:00 backup and the Sunday 03:30 update), `needrestart` in auto mode;
+  automatic reboot at 02:00 when required (before the 03:00 backup and the 04:00 nightly update), `needrestart` in auto mode;
 - fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
   rotation), `/srv/{hermes,helios,workspace}` owned by `hermes` and a copy of this repo in `/srv/command-center`.
 
@@ -290,7 +292,7 @@ All flows are headless-friendly (device code or paste-a-code). `sudo ./auth.sh <
 |---|---|---|
 | `hermes` | `hermes model` inside the agent → **Anthropic** (Claude Max OAuth), **ChatGPT or Codex Subscription**, or **xAI Grok OAuth** | `/srv/hermes/data/auth.json` |
 | `claude` | `claude auth login` inside the agent | `/srv/hermes/data/home/.claude/` |
-| `claude-token` | `claude setup-token`, optionally stored for Hermes | `/srv/hermes/data/home/.claude/`, `/srv/hermes/data/.env` |
+| `claude-token` | `claude setup-token` (1-year token, nothing to refresh), stored for Hermes — **recommended** for the Claude Subscription DirectSDK provider | `/srv/hermes/data/.env` (`CLAUDE_CODE_OAUTH_TOKEN`) |
 | `codex` | `codex login --device-auth` inside the agent | `/srv/hermes/data/home/.codex/` |
 | `grok` | `grok login --device-auth` inside the agent | `/srv/hermes/data/home/.grok/` |
 | `gh` | `gh auth login --web` + `gh auth setup-git` + git identity (`GH_CONFIG_DIR` / `GIT_CONFIG_GLOBAL`) | `/srv/hermes/data/home/.config/gh/`, `.gitconfig` |
@@ -392,8 +394,8 @@ residual risk). There is no dedicated `orca` user and no POSIX ACLs on this chec
 ```bash
 sudo ./orca.sh install         # hermes HOME, Xvfb + Electron libs, Node 22, claude/codex/grok/gh, Orca, orca.service, logins
 sudo ./orca.sh pair mobile     # phone: scan the printed QR (phone on the tailnet); `pair desktop` = runtime link
-sudo ./orca.sh creds           # re-copy the agent's logins after `auth.sh hermes|gh`
-sudo ./orca.sh login claude    # or log in with a different account (claude|codex|grok|gh)
+sudo ./orca.sh creds           # re-copy the agent's grok / gh logins after `auth.sh grok|gh`
+sudo ./orca.sh login claude    # Orca's own login (required for claude|codex, optional for grok|gh)
 sudo ./orca.sh status | logs
 ```
 
@@ -599,24 +601,66 @@ docker compose logs -f traefik             # ACME / routing
 sudo ./auth.sh shell                        # shell in the agent container
 sudo ./auth.sh status                       # logins, update hold, backup timer, orca (host), obsidian
 sudo ./agent.sh status                      # SOUL, skills count, superpowers, MCP stamp
-sudo ./update.sh                            # pull public images + agent/CLI rebuild, recreate (auto-rollback if unhealthy)
+sudo ./update.sh                            # what the 04:00 timer runs: build + test first, recreate what changed, auto-rollback
+sudo ./update.sh check                      # build + smoke-test + pull, report what would change; recreates nothing
 sudo ./update.sh rollback                   # back to the images that ran before the last update, and hold
-sudo ./update.sh resume                     # lift the hold
+sudo ./update.sh resume                     # lift the hold, forget the versions that failed
 sudo ./heal.sh                              # what hermes-heal.timer does every minute
-systemctl list-timers 'hermes-*'            # backup 03:00 daily, update Sun 03:30, heal every minute
+systemctl list-timers 'hermes-*'            # backup 03:00 daily, update 04:00 daily, heal every minute
 ```
 
-**Updates.** Public images track their pins / `:latest` (agent base, restic, `node:22-bookworm-slim`,
-`4km3/dnsmasq:2.90-r3`). `update.sh` tags every running image `:previous`, then
-`compose build --pull --no-cache hermes-agent` (so the npm CLIs advance even when the base image
-is unchanged) and `compose pull --ignore-buildable`. If `hermes-agent` is not healthy within a
-few minutes it rolls back to
-`:previous` and writes `.update-hold`. `sudo ./update.sh rollback` does the same by hand.
-Disable auto-updates: `sudo systemctl disable --now hermes-update.timer`. Pin
-`OBSIDIAN_HEADLESS_VERSION` and `ORCA_VERSION` in `.env`; the agent base by editing
-`hermes/Dockerfile` `FROM`. When Orca is installed, `update.sh` ends with `orca.sh update`; when
-herdr is installed, with `herdr.sh update` (binary + `tode`, running panes untouched). Helios images
-are rebuilt by `command-center helios deploy`, not by the weekly update.
+**Updates (every night, 04:00).** Public images track their pins / `:latest` (agent base, restic,
+`node:22-bookworm-slim`, `4km3/dnsmasq:2.90-r3`); the agent image is rebuilt with `--no-cache` so the
+npm CLIs advance even when its base is unchanged. `update.sh` never touches a running service
+before the new version has passed its checks:
+
+1. **preflight** — skipped (nothing touched) when `hermes-agent` is not healthy, updates are on hold,
+   or Docker has less than `UPDATE_MIN_FREE_GB` (10) free;
+2. **stage** — the agent image is built as `hermes-agent-vps:candidate`, never over `:latest`, and
+   smoke-tested in a throwaway offline container (`hermes`, `claude`, `codex`, `grok`, `gh` must
+   start); public images are pulled. A failed build, pull or test puts every tag back: the running
+   version stays, nothing is restarted;
+3. **compare** — same agent content (tool versions, OS and npm packages) and same digests → nothing
+   is recreated, and `:previous` (the rollback point of the last real update) is kept. A version
+   listed in `.update-failed` is skipped until a newer one ships;
+   **busy gate** — when `hermes-agent` is about to be recreated, the update first waits for Hermes to
+   be idle: no herdr pane where Hermes is `working`/`blocked`, no gateway turn, cron job, kanban run
+   or async delegation in flight, no open session active in the last 2 min (`lib/hermes-probe.py`
+   reads the container's databases, read-only). Still busy after `UPDATE_BUSY_WAIT` (1 h) → the
+   night is skipped (nothing recreated, `state/last-update` says why) and you are notified. Once
+   idle, Hermes is paused (`hermes pause`: no new gateway turn / cron / kanban dispatch) until the
+   swap is over. `sudo ./update.sh busy` shows what is working right now; `--force` does not wait;
+4. **swap** — only the services whose image changed are recreated (`--no-deps`); what they ran
+   before becomes `:previous`;
+5. **verify** — every service that was OK before must be running and healthy within
+   `UPDATE_VERIFY_TIMEOUT` (420 s) and still be `UPDATE_SETTLE` (60 s) later. Otherwise automatic
+   rollback to `:previous`, the new versions go to `.update-failed` (no hold: the next night tries
+   again once something newer is out);
+6. **host** — `orca.sh update`: host CLIs (`npm -g`, reinstalled at their previous versions when one
+   no longer starts) and the Orca release (back to the previous one, updates on hold, if it does not
+   come up); `herdr.sh update` (binary + `tode`, previous binary restored if the new one does not
+   start, running panes untouched).
+
+**Hermes sessions in herdr survive the swap.** Just before `hermes-agent` is recreated, the herdr
+panes whose foreground is the Hermes CLI are noted; once it is healthy again (after the update or
+its rollback), each gets `hermes --resume <id>` typed into its shell — the id the CLI printed when
+the recreate closed it. The id is only typed when it has the exact session-id format and is a CLI
+session that ended during this recreate (pane output is not trusted). Same for `heal.sh`,
+`command-center hermes restart` and `auth.sh` (they go through `restart_agent`, which also asks
+first, from a terminal, when Hermes is working). `hermes` on the host keeps a process named
+`hermes` in the foreground (`bin/hermes` does not `exec` docker) so herdr recognises the agent and
+its idle / working / blocked state.
+
+The result of the last run is in `state/last-update` (`command-center status`); set
+`UPDATE_NOTIFY_HERMES=telegram` (the Hermes agent messages its Telegram home channel through
+`hermes send`) and/or `UPDATE_NOTIFY_URL` (Discord webhook or `https://ntfy.sh/<topic>`) in `.env`
+to be told about skipped nights, failures and rollbacks. `sudo ./update.sh rollback` goes back to `:previous` by hand and puts the
+timer on hold (`update.sh resume` lifts it). Disable auto-updates: `sudo systemctl disable --now
+hermes-update.timer`. Pin `OBSIDIAN_HEADLESS_VERSION` and `ORCA_VERSION` in `.env`; the agent base by
+editing `hermes/Dockerfile` `FROM`. Recreating `hermes-agent` ends its running sessions: that only
+happens on a night where its image really changed, once Hermes is idle. Helios images are rebuilt by
+`command-center helios deploy`, not by the nightly update (it builds the workspace checkout, which is
+reviewed before deploying).
 
 **Healing.** `hermes-heal.timer` runs `heal.sh` every minute — restarts containers Docker marks
 unhealthy or stuck in Docker's `restarting` loop, starts exited ones, and recreates
@@ -648,7 +692,7 @@ applies to containers and restic only; timer times follow the host timezone (`ti
 | SSH key of `hermes` | `sudo /srv/command-center/harden.sh --rotate-key` |
 | Orca pairings | revoke in the app (Shared Server Access) |
 | Agent coding CLI logins | `sudo ./auth.sh claude\|codex\|grok` |
-| Orca coding CLI logins | `sudo ./orca.sh login claude\|codex\|grok` (and `sudo ./orca.sh creds` after agent-side logins) |
+| Orca coding CLI logins | `sudo ./orca.sh login claude\|codex\|grok` (and `sudo ./orca.sh creds` for grok / gh after agent-side logins) |
 
 Changing `HERMES_HOST` / `DNS_ZONE`: edit `.env` (host inside zone), `sudo ./install.sh`
 (recreates `hermes-dns` and `hermes-agent` — the router labels live on `hermes-agent`, Traefik
@@ -695,7 +739,7 @@ Node, Xvfb and the Electron libraries.
 | `agent.sh` / `agent/` / `skills/` / `mcp/` | default agent as code (sync-files / sync / diff / status) |
 | `migrate-single-agent.sh` | in-place cut-over from six profiles + user `orca` |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
-| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / pull + thin rebuild with `:previous` rollback |
+| `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / nightly update: tested before the swap, automatic `:previous` rollback |
 | `backup.sh` / `heal.sh` | restic → B2 backups / self-healing |
 | `systemd/` | `hermes-backup`, `hermes-update`, `hermes-heal` service + timer templates |
 | `lib/common.sh` | shared helpers, `/srv` layout defaults, `ensure_workspace` |
@@ -735,8 +779,11 @@ Node, Xvfb and the Electron libraries.
 - **Permission denied under `/srv/hermes` or `/srv/workspace`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
   directory owner; `sudo command-center workspace fix`, or re-run `sudo ./install.sh`. Right after an update this can also mean the
   upstream image changed its uid handling: `sudo ./update.sh rollback`.
-- **Update broke something** — `sudo ./update.sh rollback` (previous images, timer on hold);
-  `journalctl -u hermes-update -n 100` for what happened. `sudo ./update.sh resume` when fixed.
+- **Update broke something** — a service that no longer comes up healthy is rolled back
+  automatically; for a subtler breakage: `sudo ./update.sh rollback` (previous images, timer on hold).
+  `journalctl -u hermes-update -n 100` for what happened, `state/last-update` for the last result.
+  `sudo ./update.sh resume` when fixed. Host CLIs: `sudo npm i -g <pkg>@<version>`; herdr:
+  `sudo ./herdr.sh rollback`; Orca: `sudo ./orca.sh rollback`.
 - **A service I stopped keeps coming back** — `heal.sh`: `touch /srv/command-center/.maintenance`
   first (remove it when done).
 - **Browser tools crash** — `shm_size` is 1g; raise `AGENT_MEM_LIMIT` (default 10g / 6 CPUs, sized for an 8 vCPU / 16 GB VPS).
