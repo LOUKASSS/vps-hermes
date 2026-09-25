@@ -202,7 +202,7 @@ ensure_workspace() {
   local w="$HERMES_WORKSPACE_DIR" d
   no_symlink "$w"
   install -d -m 0755 -o "$HERMES_UID" -g "$HERMES_GID" "$w"
-  for d in projects worktrees scratch db db/migrations; do
+  for d in projects worktrees scratch; do   # db/ = link to projects/personal-db (its own repo)
     [ -e "$w/$d" ] || install -d -m 0755 -o "$HERMES_UID" -g "$HERMES_GID" "$w/$d"
   done
   if [ -L /workspace ]; then

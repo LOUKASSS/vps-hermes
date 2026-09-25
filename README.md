@@ -24,11 +24,18 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
 ├── orca/                   Orca HOME (0700, not mounted in the agent)
 ├── helios/                 Helios deployment: .env (secrets), tinyauth/data
 └── workspace/  → /srv/workspace (same path in the agent; /workspace = alias, also on the host)
-    ├── projects/<repo>/        every git repo (helios, indo-vacation, hermes-agent…)
+    ├── projects/<repo>/        one git repo per tool / project, one herdr workspace each:
+    │     hermes-config/          the agent as code (SOUL, skills, MCP) → `command-center hermes sync`
+    │     herdr-config/           herdr config + workspaces → `command-center herdr apply`
+    │     personal-db/            Postgres migrations (health, markets); db → projects/personal-db
+    │     helios/  discord-backup-bot/  indo-vacation/  hermes-agent/
     ├── worktrees/{hermes,orca,herdr}/   git worktrees, per tool
-    ├── vault/  scratch/  db/migrations/  helios/ (watchlist data)
+    ├── vault/  scratch/  helios/ (watchlist data)
     └── HERMES.md  AGENTS.md  CLAUDE.md → AGENTS.md   (rules for every agent, from hermes-config agent/)
 ```
+
+**Where to start an agent:** at the root of the repo it works on (the herdr workspace of that repo),
+never at `/srv/workspace`: the agent then sees one tree, one git, and that repo's `AGENTS.md`.
 
 **One place for projects.** The Hermes agent (container), Orca sessions (host, `/srv/orca`
 HOME), herdr panes and SSH shells (host, `/home/hermes` HOME) all work in `/srv/workspace`, at
@@ -81,7 +88,7 @@ The underlying scripts (`install.sh`, `auth.sh`, `agent.sh`, `orca.sh`, `helios.
 
 ## Workspace (`/srv/workspace`)
 
-Created by `install.sh` (`ensure_workspace`): `projects/`, `worktrees/`, `scratch/`, `db/migrations/`,
+Created by `install.sh` (`ensure_workspace`): `projects/`, `worktrees/`, `scratch/`,
 owned by `HERMES_UID`, plus the host symlink `/workspace → /srv/workspace` so paths the agent
 wrote through its historical `/workspace` mount (kanban worktrees, old sessions) resolve on the host
 too. `hermes-agent` mounts it twice: at `/srv/workspace` (canonical, `terminal.cwd`) and at
