@@ -222,8 +222,7 @@ PY
 }
 
 seed_essentials() {
-  agent_run env PYTHONPATH="$HERMES_CURRENT" HERMES_HOME=/opt/data python3 -c \
-    'from tools.skills_sync import sync_skills; r = sync_skills(quiet=True); r = r or {}; n = lambda v: v if isinstance(v, int) else len(v or []); print("  essentials: %d copied, %d updated, %d up to date" % (n(r.get("copied")), n(r.get("updated")), n(r.get("skipped"))))' \
+  hermes_py 'from tools.skills_sync import sync_skills; r = sync_skills(quiet=True); r = r or {}; n = lambda v: v if isinstance(v, int) else len(v or []); print("  essentials: %d copied, %d updated, %d up to date" % (n(r.get("copied")), n(r.get("updated")), n(r.get("skipped"))))' \
     2>/dev/null || warn "essential-skill seeding failed (hermes update will do it)"
 }
 
