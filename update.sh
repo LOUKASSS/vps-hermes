@@ -337,7 +337,7 @@ agent_verify() { agent_wait_healthy "$UPDATE_VERIFY_TIMEOUT" && sleep "$UPDATE_S
 
 update_agent() {
   local mode="$1" sha short cur out busy
-  [ -e "$HERMES_CURRENT/.release" ] || { warn "Hermes is not installed on the host — skipped (sudo command-center deploy hermes)"; return 0; }
+  hermes_installed || { warn "Hermes is not installed on the host — skipped (sudo command-center deploy hermes)"; return 0; }
   cur="$("$HERMES_HOST_SH" current)"
   if ! sha="$("$HERMES_HOST_SH" resolve)"; then
     record "Hermes: cannot resolve ${HERMES_REF:-main} — skipped"; warn "Hermes: cannot resolve ${HERMES_REF:-main}"; return 0

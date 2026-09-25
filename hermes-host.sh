@@ -130,7 +130,7 @@ for cmd, pkg in (("python3", "python"), ("node", "node"), ("npm", "npm"), ("ffmp
 # which the agent reads at run time. HOME is a throwaway dir (the installer edits shell rc files
 # and publishes ~/.local/bin/hermes); only then is the tree sealed root-owned.
 do_build() {
-  local sha short rel app sandbox rc=0
+  local sha short rel app sandbox rc=0 e extras=() extra_args=()
   install_deps
   sha="$(resolve_ref "${1:-$HERMES_REF}")"; short="${sha:0:12}"; rel="$HERMES_RELEASES/$short"; app="$rel/app"
   BUILT_SHORT="$short"
@@ -151,12 +151,24 @@ do_build() {
   info "Building Hermes $short with its own installer (as $OP_USER, HERMES_HOME=/opt/data)…"
   runuser -u "$OP_USER" -- env -i HOME="$sandbox/home" HERMES_HOME=/opt/data HERMES_RUNTIME_DIR="$app/tools" \
     HERMES_REPO_URL="$HERMES_REPO" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    LANG=C.UTF-8 SHELL=/bin/bash \
+    LANG=C.UTF-8 SHELL=/bin/bash CC=gcc CXX=g++ \
     bash "$sandbox/install.sh" --commit "$sha" --dir "$app" --hermes-home /opt/data --non-interactive --verbose || rc=$?
-  rm -rf "$sandbox"
   if [ "$rc" -ne 0 ] || [ ! -x "$app/.hermes/bin/hermes" ]; then
-    drop_release "$short"; die "upstream installer failed for $short (exit $rc)"
+    rm -rf "$sandbox"; drop_release "$short"; die "upstream installer failed for $short (exit $rc)"
   fi
+  # The image bakes its extras (messaging adapters, providers…) and forbids lazy installs; a native
+  # install only has the base set and installs the rest on demand. Bake the image's extras here —
+  # read from the release's own Dockerfile — so the release is complete and sealed like the image.
+  mapfile -t extras < <(grep -oE -- '--extra [A-Za-z0-9_-]+' "$app/Dockerfile" 2>/dev/null | awk '{print $2}' | sort -u)
+  [ "${#extras[@]}" -gt 0 ] || extras=(all messaging otlp anthropic bedrock azure-identity matrix google-chat)
+  for e in "${extras[@]}"; do extra_args+=(--extra "$e"); done
+  info "pm install ${extras[*]}"
+  # CC/CXX as in the Dockerfile: native extras build from source with gcc (no clang on the host).
+  runuser -u "$OP_USER" -- env -i HOME="$sandbox/home" HERMES_HOME=/opt/data HERMES_RUNTIME_DIR="$app/tools" \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 CC=gcc CXX=g++ \
+    "$app/.hermes/bin/hermes" --run-module pm.cli install "${extra_args[@]}" \
+    || { rm -rf "$sandbox"; drop_release "$short"; die "pm install of the image extras failed for $short"; }
+  rm -rf "$sandbox"
   make_hostbin "$app" || { drop_release "$short"; die "cannot link the pm tools of $short (.hostbin)"; }
   echo "$sha" > "$app/.hermes_build_sha"
   chown -R root:root "$rel"; chmod -R a+rX,go-w "$rel"
@@ -191,6 +203,12 @@ assert db.execute("SELECT count(*) FROM docs WHERE docs MATCH '"'"'erm'"'"'").fe
 print("sqlite", sqlite3.sqlite_version)
 PY
     "$3" --version
+    # Messaging adapters load (the gateway needs them; Telegram is the operator channel).
+    if [ -x "$5/.hermes/bin/hermes" ]; then
+      "$2" -I -c "import sys; sys.path.insert(0, sys.argv[1]); import hermes_bootstrap, telegram; print(\"telegram\", telegram.__version__)" "$5"
+    else
+      "$2" -c "import telegram; print(\"telegram\", telegram.__version__)"
+    fi
     test -f "$5/hermes_cli/web_dist/index.html"
     test -f "$5/ui-tui/dist/entry.js"
   ' sh "$hermes" "$py" "$node" "$SQLITE_MIN" "$app" || rc=$?

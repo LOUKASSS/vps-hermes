@@ -15,7 +15,7 @@
 : "${UPDATE_BUSY_POLL:=60}"
 HERMES_ESTOP_OURS=0
 
-hermes_up() { [ -e "$HERMES_CURRENT/.release" ] && agent_running; }
+hermes_up() { hermes_installed && agent_running; }
 hermes_probe() { agent_run python3 - "$@" < "$STACK_DIR/lib/hermes-probe.py"; }
 
 # One line per piece of work a restart would cut; empty = idle. Fails closed: a probe that cannot

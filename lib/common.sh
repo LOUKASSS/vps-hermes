@@ -154,7 +154,7 @@ UPDATE_HOLD="$STACK_DIR/.update-hold"
 notify() {
   local url="${UPDATE_NOTIFY_URL:-}" target="${UPDATE_NOTIFY_HERMES:-}" msg
   msg="[$(hostname)] $*"
-  if [ -n "$target" ] && [ -e "$HERMES_CURRENT/.release" ] && [ -r "$AGENT_ENV" ]; then
+  if [ -n "$target" ] && hermes_installed && [ -r "$AGENT_ENV" ]; then
     agent_run timeout 60 hermes send -q --to "$target" "$msg" >/dev/null 2>&1 || warn "notify: hermes send --to $target failed"
   fi
   [ -n "$url" ] || return 0
@@ -209,6 +209,9 @@ _agent_cmd() {
 }
 agent_exec() { _agent_cmd "$@"; }
 agent_run() { _agent_cmd "$@"; }
+
+# hermes_installed — /opt/hermes points at a release Hermes can run from (native launcher or legacy venv).
+hermes_installed() { [ -x "$HERMES_CURRENT/.hermes/bin/hermes" ] || [ -x "$HERMES_CURRENT/.venv/bin/hermes" ]; }
 
 # hermes_py <code> [args…] — Python with Hermes' dependencies loaded, as the agent. Native releases:
 # pm's interpreter + hermes_bootstrap (what the .hermes/bin/hermes launcher does); legacy: the .venv.

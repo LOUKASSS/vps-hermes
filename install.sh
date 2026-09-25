@@ -148,7 +148,7 @@ if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
   lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
 fi
 # A re-run keeps the active release (update.sh moves it forward); a fresh VPS builds HERMES_REF.
-if [ ! -e "$HERMES_CURRENT/.release" ]; then
+if ! hermes_installed; then
   info "Building the Hermes release (HERMES_REF=${HERMES_REF:-main})…"
   _rel="$("$STACK_DIR/hermes-host.sh" build | tail -n1)"
   [ -n "$_rel" ] || die "Hermes build failed"

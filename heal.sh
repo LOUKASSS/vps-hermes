@@ -24,7 +24,7 @@ HEAL_MAX_AGENT_RECREATES="${HEAL_MAX_AGENT_RECREATES:-3}"
 HEAL_AGENT_GRACE="${HEAL_AGENT_GRACE:-3}"
 
 # ── Hermes (host) ──
-if [ -e "$HERMES_CURRENT/.release" ] && agent_running; then
+if hermes_installed && agent_running; then
   if agent_healthy; then
     rm -f "$AGENT_FAILS" "$AGENT_UNHEALTHY"
   else
