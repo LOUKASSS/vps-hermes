@@ -7,6 +7,7 @@
 #   /srv/hermes           Hermes agent: data/ (/opt/data), obsidian/, postgres/
 #   /srv/orca             Orca HOME (orca.service)
 #   /srv/helios           Helios deployment: .env, tinyauth/ (code: WORKSPACE/projects/helios)
+#   /srv/discord-backup   Discord backup bot: app/ releases, bws.env, var/ archives (discord-backup.sh)
 #   /srv/workspace        shared projects — same absolute path on the host and in hermes-agent
 
 # Physical path (-P): scripts reached through a compat symlink must still resolve to the real
@@ -59,6 +60,7 @@ load_env() {
   : "${OBSIDIAN_DIR:=$SRV_ROOT/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=$SRV_ROOT/orca}"
   : "${POSTGRES_DIR:=$SRV_ROOT/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
   : "${HELIOS_DIR:=$SRV_ROOT/helios}" "${HELIOS_SRC:=$HERMES_WORKSPACE_DIR/projects/helios}"
+  : "${DISCORD_BACKUP_DIR:=$SRV_ROOT/discord-backup}"
   : "${OP_USER:=hermes}" "${OP_HOME:=$(getent passwd "${OP_USER}" 2>/dev/null | cut -d: -f6)}"
   : "${OP_HOME:=/home/$OP_USER}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
@@ -213,6 +215,7 @@ restic_run() {
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
   [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
   [ -d "$HELIOS_DIR" ] && helios=(-v "$HELIOS_DIR:$HELIOS_DIR:ro")   # Helios .env + tinyauth state
+  [ -d "$DISCORD_BACKUP_DIR/var" ] && discord=(-v "$DISCORD_BACKUP_DIR/var:$DISCORD_BACKUP_DIR/var:ro")   # sealed Discord archives + bot state
   docker run --rm "${tty[@]}" "${rw[@]}" --name "hermes-restic-$$" --hostname hermes-vps \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e B2_ACCOUNT_ID -e B2_ACCOUNT_KEY \
     -e RESTIC_CACHE_DIR=/cache -e TZ="${TZ:-UTC}" \
