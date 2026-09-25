@@ -5,15 +5,17 @@
 #   /srv/hermes           Hermes agent data (data/, obsidian/, postgres/)
 #   /srv/orca             Orca HOME (orca.service, on the host)
 #   /srv/helios           Helios deployment (.env, tinyauth state); code in the workspace
+#   /srv/discord-backup   Discord backup bot (releases, bws.env, sealed archives)
 #   /srv/workspace        shared projects — same path for the agent, Orca, herdr and SSH
 #
 #   sudo command-center                       # interactive menu
 #   sudo command-center status                # everything at a glance
-#   sudo command-center deploy <all|hermes|orca|helios|herdr>   # one-click (idempotent) deploys
+#   sudo command-center deploy <all|hermes|orca|helios|herdr|discord-backup>   # one-click (idempotent) deploys
 #   sudo command-center hermes <auth|agent|update|rollback|backup|logs|shell|chat|restart|ps> [args…]
 #   sudo command-center orca   <install|update|pair|creds|login|status|logs|…>   (orca.sh)
 #   sudo command-center helios <deploy|status|ps|logs|down|restart>              (helios.sh)
 #   sudo command-center herdr  <install|update|creds|login|status|logs|restart>  (herdr.sh)
+#   sudo command-center discord-backup <install|import|start|deploy|rollback|status|logs|verify|stop>  (discord-backup.sh)
 #   sudo command-center workspace [status|fix]   # tree, ownership, /workspace link, context files
 #   sudo command-center migrate [--dry-run] | finalize   # pre-/srv install → this layout
 #   sudo command-center backup <run|snapshots|…> · update · harden   (backup.sh / update.sh / harden.sh)
@@ -34,7 +36,7 @@ do_status() {
   need_root; load_env
   echo "── /srv layout ──"
   local d
-  for d in command-center hermes orca helios workspace; do
+  for d in command-center hermes orca helios discord-backup workspace; do
     if [ -L "$SRV_ROOT/$d" ]; then line "$d" "SYMLINK → $(readlink "$SRV_ROOT/$d") (unexpected)"
     elif [ -d "$SRV_ROOT/$d" ]; then line "$d" "$(stat -c '%U:%G %a' "$SRV_ROOT/$d")  $(du -sh --apparent-size "$SRV_ROOT/$d" 2>/dev/null | cut -f1 || true)"
     else line "$d" "missing"; fi
@@ -62,6 +64,11 @@ do_status() {
 
   echo; echo "── herdr ──"
   { "$STACK_DIR/herdr.sh" status 2>/dev/null || echo "(herdr.sh status failed)"; } | sed -n '1,4s/^/  /p'
+
+  echo; echo "── discord-backup ──"
+  if [ -e /etc/systemd/system/discord-backup-bot.service ]; then
+    { "$STACK_DIR/discord-backup.sh" status 2>/dev/null || echo "(discord-backup.sh status failed)"; } | sed 's/^/  /'
+  else line "service" "not installed (command-center discord-backup install)"; fi
 
   echo; echo "── workspace ──"
   workspace_status | sed 's/^/  /'
@@ -124,13 +131,15 @@ do_deploy() {
     orca)   if [ -e /opt/orca/current ]; then sub orca.sh update; else sub orca.sh install; fi ;;
     helios) sub helios.sh deploy ;;
     herdr)  sub herdr.sh install ;;
+    discord-backup) sub discord-backup.sh deploy ;;
     all)
       sub install.sh
       if [ -e /opt/orca/current ]; then sub orca.sh update; else sub orca.sh install; fi
       load_env
       if [ -f "$HELIOS_DIR/.env" ]; then sub helios.sh deploy; else warn "helios skipped: $HELIOS_DIR/.env missing"; fi
-      sub herdr.sh install ;;
-    *) die "usage: command-center deploy <all|hermes|orca|helios|herdr>" ;;
+      sub herdr.sh install
+      if [ -e "$DISCORD_BACKUP_DIR/app/current" ]; then sub discord-backup.sh deploy; else warn "discord-backup skipped: not installed (command-center discord-backup install)"; fi ;;
+    *) die "usage: command-center deploy <all|hermes|orca|helios|herdr|discord-backup>" ;;
   esac
 }
 
@@ -154,6 +163,7 @@ menu() {
   12) workspace fix     ownership + /workspace link + context files
   13) backup run        restic backup to B2 now
   14) update            weekly update now (images, CLIs, Orca, herdr)
+  15) discord-backup    status of the Discord backup bot (archives, verification)
    q) quit
 MENU
   local c; read -r -p "> " c
@@ -162,6 +172,7 @@ MENU
     5) do_deploy helios ;; 6) do_deploy herdr ;; 7) sub auth.sh ;; 8) sub auth.sh shell ;;
     9) CUTOVER=1 sub agent.sh sync ;; 10) read -r -p "desktop or mobile? " m; sub orca.sh pair "${m:-desktop}" ;;
     11) sub herdr.sh creds ;; 12) do_workspace fix ;; 13) sub backup.sh run ;; 14) sub update.sh ;;
+    15) sub discord-backup.sh status ;;
     q|Q) exit 0 ;; *) warn "unknown choice: $c" ;;
   esac
 }
@@ -175,12 +186,13 @@ case "$cmd" in
   orca)      run orca.sh "$@" ;;
   helios)    run helios.sh "$@" ;;
   herdr)     run herdr.sh "$@" ;;
+  discord-backup) run discord-backup.sh "$@" ;;
   workspace) do_workspace "$@" ;;
   migrate)   run migrate-srv-layout.sh "$@" ;;
   backup)    run backup.sh "$@" ;;
   update)    run update.sh "$@" ;;
   harden)    run harden.sh "$@" ;;
   auth)      run auth.sh "$@" ;;
-  -h|--help|help) sed -n '2,21p' "$(readlink -f "$0")" ;;
+  -h|--help|help) sed -n '2,23p' "$(readlink -f "$0")" ;;
   *) die "unknown command: $cmd (command-center help)" ;;
 esac

@@ -58,17 +58,23 @@ public images (`4km3/dnsmasq:2.90-r3`, `node:22-bookworm-slim`).
 
 ```bash
 sudo command-center                         # menu
-sudo command-center status                  # /srv layout, containers, orca, helios, herdr, workspace
+sudo command-center status                  # /srv layout, containers, orca, helios, herdr, discord-backup, workspace
 sudo command-center deploy all              # one click: platform + Hermes, Orca, Helios, herdr
-sudo command-center deploy hermes|orca|helios|herdr
+sudo command-center deploy hermes|orca|helios|herdr|discord-backup
 sudo command-center hermes auth|shell|chat|sync|update|rollback|backup|restart|logs|ps
 sudo command-center orca pair mobile|creds|login claude|status|logs
 sudo command-center helios deploy|status|logs|ps|down
 sudo command-center herdr install|update|creds|login claude|status|logs|restart
+sudo command-center discord-backup install|import|start|deploy|rollback|status|logs|verify|stop
 sudo command-center workspace [status|fix]  # ownership, /workspace link, HERMES.md / AGENTS.md
 ```
 
-The underlying scripts (`install.sh`, `auth.sh`, `agent.sh`, `orca.sh`, `helios.sh`, `herdr.sh`,
+`hermes` on the host runs the Hermes CLI **inside** `hermes-agent` (`/usr/local/bin/hermes` →
+`bin/hermes`): same uid, `HOME=/opt/data/home` and config as the gateway, cwd = the current directory
+when it is under `/srv/workspace` (else the workspace root). Any subcommand works (`hermes`,
+`hermes chat --resume <id>`, `hermes config get …`); root or the `docker` group, no sudo needed for `hermes`.
+
+The underlying scripts (`install.sh`, `auth.sh`, `agent.sh`, `orca.sh`, `helios.sh`, `herdr.sh`, `discord-backup.sh`,
 `backup.sh`, `update.sh`, `heal.sh`, `harden.sh`) still work on their own; the sections below use them.
 
 ## Workspace (`/srv/workspace`)
@@ -114,6 +120,40 @@ runs the repo's `deploy.sh` as `hermes` with `HELIOS_ENV_FILE=/srv/helios/.env` 
 `HELIOS_STATE_DIR=/srv/helios`; `HOME` is `HELIOS_CLI_HOME` (default `/srv/orca`: fitness-sync reads
 its CLI logins for the quota panel, `deploy.sh` its `bws` binary and token under `.hermes/`). Compose
 project `loukass`, on the `proxy` network (subnet pinned to `PROXY_SUBNET`, which tinyauth trusts).
+
+## Discord backup bot
+
+[discord-backup-bot](https://github.com/LOUKASSS/discord-backup-bot) takes encrypted (AES-256-GCM)
+snapshots of the Discord guild at 04:00 Paris time and answers `/backup …`; a timer verifies every
+archive at 05:00. `discord-backup.sh` runs it on the host as two **system units with `User=hermes`**,
+taken from the repo's `deploy/` (whose tests guard their hardening: `systemd-analyze security` ≈ 1.5).
+
+```
+/srv/discord-backup/        0700 hermes — NOT mounted in the agent container, not in the workspace
+├── app/src.git             bare mirror (fetched as hermes, gh credentials)
+├── app/releases/<sha>/     git archive + npm ci + npm run check, then root:root read-only
+├── app/current, previous   what the units run / the rollback target
+├── bws.env                 BWS_ACCESS_TOKEN only (0600), copied from $HELIOS_CLI_HOME/.hermes/.env
+└── var/                    backups/ (*.dsnap sealed, legacy v1 *.json), state, backup.lock, *.log
+```
+
+Secrets: the launcher (`bin/run-with-bws.py`) reads `DISCORD_BACKUP_BOT_TOKEN` and
+`DISCORD_BACKUP_ARCHIVE_KEY` from Bitwarden Secrets Manager (project `hermes`) at every start, in
+memory only. `bws` is `/usr/local/bin/bws` (pinned 2.0.0, sha256-checked). **Never replace
+`DISCORD_BACKUP_ARCHIVE_KEY`**: every archive is sealed with it.
+
+```bash
+sudo command-center discord-backup install        # bws, tree, bws.env, tested release, units — nothing started
+sudo command-center discord-backup import <dir>   # an old var/ (backups/, state) in, bot stopped
+sudo command-center discord-backup start          # bot + 05:00 verify timer (asks: old instance stopped?)
+sudo command-center discord-backup deploy [ref]   # new release (DISCORD_BACKUP_REF); restarted, waits READY, auto-rollback
+sudo command-center discord-backup status | logs | verify | rollback | stop | uninstall
+```
+
+One instance per bot token: a second one (old host, a dev run) would also answer `/backup` and run
+the 04:00 capture. `deploy` is manual — the automatic `update.sh` never touches the bot. The nightly
+restic job copies `var/` (still sealed) to B2. Recovery procedures: the repo's
+`docs/RECOVERY-RUNBOOK.md`, in `/srv/discord-backup/app/current/docs/`.
 
 ## Network and security
 
@@ -422,7 +462,8 @@ sudo journalctl -u hermes-backup  # history
 
 B2: private bucket + an application key restricted to it (`listBuckets, listFiles, readFiles,
 writeFiles, deleteFiles`). restic (in a throwaway `restic/restic` container) encrypts client-side
-and deduplicates; retention 7 daily / 4 weekly / 6 monthly, prune on Sundays.
+and deduplicates; retention 7 daily / 4 weekly / 6 monthly, prune on Sundays. `/srv/discord-backup/var`
+(the Discord bot's archives, already sealed with a key that exists only in Bitwarden) is included.
 
 Each run first takes `hermes backup` inside the agent (consistent `state.db` snapshot), then
 writes a fresh `pg_dumpall` of `hermes-postgres` to `postgres/dumps/`, then uploads `data/`,
@@ -648,6 +689,7 @@ Node, Xvfb and the Electron libraries.
 | `orca.sh` / `orca/orca.service` | Orca on the host as `User=hermes`, HOME `/srv/orca`, cwd `/srv/workspace`, `GIT_CONFIG_COUNT` |
 | `helios.sh` | Helios deploy/admin: code `/srv/workspace/projects/helios`, deployment `/srv/helios` |
 | `herdr.sh` / `herdr/herdr.service` | herdr + terminal-code plugin for `hermes`, `herdr server` as a systemd service |
+| `discord-backup.sh` | Discord backup bot: tested releases in `/srv/discord-backup`, units from the repo's `deploy/`, BWS secrets |
 | `agent/WORKSPACE.md` | → `/srv/workspace/AGENTS.md` (+ `CLAUDE.md` link): rules for every agent in the workspace |
 | `migrate-srv-layout.sh` | live move from `/srv/hermes/*` to the `/srv` layout (phase 1 + `finalize` for Orca) |
 | `agent.sh` / `agent/` / `skills/` / `mcp/` | default agent as code (sync-files / sync / diff / status) |

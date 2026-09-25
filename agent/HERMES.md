@@ -19,6 +19,7 @@ sans demande explicite. Un seul agent, une SOUL, des skills — pas de profiles.
 | `/srv/command-center` | scripts de déploiement et d'admin, compose, secrets `.env` | invisible — l'opérateur lance `sudo command-center …` |
 | `/srv/orca` | HOME d'Orca (sessions Claude/Codex/Grok de l'opérateur, desktop + mobile) | invisible |
 | `/srv/helios` | déploiement Helios (`.env`, tinyauth) ; le code est dans `projects/helios` | invisible |
+| `/srv/discord-backup` | bot de sauvegarde Discord (archives chiffrées, secrets via Bitwarden) — service système, hors de ta portée | invisible |
 
 `/workspace` est un alias de `/srv/workspace` (anciens chemins, kanban). Écris les nouveaux
 chemins en `/srv/workspace/…` : ils sont valides tels quels sur l'hôte, dans Orca et dans herdr.
@@ -76,6 +77,7 @@ Schémas `health` et `markets`. Migrations dans `db/migrations/`. Tables avec PK
 | Cible | Commande que tu donnes à l'opérateur |
 |---|---|
 | Helios (après merge dans `projects/helios`) | `sudo command-center helios deploy` |
+| Bot de sauvegarde Discord (après merge dans le dépôt) | `sudo command-center discord-backup deploy` |
 | Toi-même (image, compose) | `sudo command-center deploy hermes` |
 | Tes skills / SOUL / MCP (repo command-center) | `sudo command-center hermes sync` |
 | Tout voir | `sudo command-center status` |
