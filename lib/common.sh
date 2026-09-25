@@ -221,7 +221,8 @@ hermes_py() {
   if [ -x "$app/.venv/bin/python" ]; then
     agent_run "$app/.venv/bin/python" -c "$code" "$@"
   else
-    agent_run "$app/.hostbin/python3" -I -c 'import os, sys
+    # The resolved pm interpreter, as the launcher runs it: Hermes derives the unit's PATH from it.
+    agent_run "$(readlink -f "$app/.hostbin/python3")" -I -c 'import os, sys
 app, code = sys.argv[1], sys.argv[2]; del sys.argv[1:3]
 for k in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"): os.environ.pop(k, None)
 sys.path.insert(0, app)
