@@ -18,6 +18,23 @@ set -euo pipefail
 agent_wrapper_init
 hermes_installed || die "no active Hermes release in $HERMES_CURRENT (sudo command-center hermes status)"
 
+# `hermes update` is refused by the release itself (/etc/hermes/image-provenance.json: the command
+# center owns updates), with a bare "hermes update" as its only explanation. Say what to run instead.
+if [ "${1:-}" = update ]; then
+  cat >&2 <<'MSG'
+Hermes is updated by the command center, not in place: each upstream commit is built as its own
+release, smoke-tested, switched to once Hermes is idle, and rolled back if it does not stay healthy.
+
+  sudo command-center update --force     # update now (latest main): build, switch, verify
+  sudo command-center update check       # build and report what would change; switches nothing
+  sudo command-center hermes status      # active release, previous one, health
+  sudo command-center hermes rollback    # back to the previous release (pauses automatic updates)
+
+Automatic: every night at 04:00 (hermes-update.timer).
+MSG
+  exit 2
+fi
+
 # No `exec`: this script — a process named `hermes` — stays in the terminal's foreground, which is
 # how herdr recognises the agent and tracks idle / working / blocked. Its exit status is the CLI's.
 agent_exec hermes "$@"
