@@ -97,8 +97,14 @@ what `projects/helios` contains — review the diff before deploying.
 `sudo command-center herdr install` (`herdr.sh`):
 
 - installs herdr for `hermes` with the official sha256-verified installer (`~/.local/bin/herdr`),
-  seeds `~/.config/herdr/config.toml` (`onboarding = false`, new panes in `/srv/workspace`,
+  seeds `~/.config/herdr/config.toml` (`onboarding = false`, `new_cwd = "follow"`,
   worktrees in `/srv/workspace/worktrees/herdr`, native agent resume on restore);
+- clones [herdr-config](https://github.com/LOUKASSS/herdr-config) (`HERDR_CONFIG_DIR`, default
+  `/srv/workspace/projects/herdr-config`) and runs its `bin/herdr-apply all` as `hermes`: the
+  **committed** `config.toml` (a copy, never a symlink into the workspace — herdr runs config
+  commands as `hermes`), pinned plugins, and **one workspace per repo** opened at its root, so
+  herdr-sidebar's source control and `prefix+shift+g` worktrees follow the right repo.
+  Later: `sudo command-center herdr apply [config|workspaces [--dry-run]|plugins|diff]`;
 - installs the plugin `zenbu-labs/terminal-code/herdr-plugin` (builds `tode` into `~/.local/lib/tode`)
   and the herdr integrations for `claude`, `codex`, `grok` (session restore);
 - runs `herdr server` as **`herdr.service`** (`User=hermes`, `HOME=/home/hermes`, `MemoryMax=HERDR_MEM_LIMIT`):
