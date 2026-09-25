@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Post-update health check of oh-my-hermes: `omh doctor` inside hermes-agent, notify on failure.
+#
+# Run by the systemd drop-in /etc/systemd/system/hermes-update.service.d/omh-check.conf
+# (ExecStartPost, after a successful update.sh), or by hand:  sudo /srv/command-center/bin/omh-check
+# A failure never undoes the update: it only reports (journal + UPDATE_NOTIFY_URL) and exits 1.
+set -euo pipefail
+
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+load_env
+
+OMH="$(dirname "$(readlink -f "$0")")/omh"
+
+fail() {
+  warn "omh-check: $*"
+  notify "omh-check: $* — run: sudo /srv/command-center/bin/omh doctor"
+  exit 1
+}
+
+# doctor may exit non-zero when not ok: judge by its JSON, and treat no JSON as "did not run"
+# (container down, missing venv or interpreter after the image update…): report its last stderr line.
+errfile="$(mktemp)"
+trap 'rm -f "$errfile"' EXIT
+report="$("$OMH" doctor --json 2>"$errfile" </dev/null || true)"
+err="$(tail -n 1 "$errfile" | cut -c1-300)"
+[ -n "$report" ] || fail "omh doctor did not run${err:+: $err}"
+
+ok="$(jq -r '.ok' <<<"$report" 2>/dev/null || echo parse-error)"
+blocking="$(jq -r '[.checks[]? | select(.severity == "blocking") | (.name // .id)] | join(", ")' <<<"$report" 2>/dev/null || true)"
+
+[ "$ok" = true ] || fail "omh doctor not ok${blocking:+ (blocking: $blocking)}"
+info "omh-check: ok"

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# `omh` on the host → the oh-my-hermes CLI inside the hermes-agent container.
+#
+# OMH lives entirely under /opt/data (survives the nightly image rebuild):
+#   /opt/data/.local/bin/omh                 → venv in /opt/data/home/.local/share/omh/venv
+#   base interpreter                          uv-managed CPython in /opt/data/home/.local/share/uv/python
+#   /opt/data/home/.omh                       OMH state (skills, routing, runtime), pinned in config.yaml
+#                                             as plugins.entries.omh.settings.omh_home (the gateway runs
+#                                             with HOME=/opt/data, the CLI with /opt/data/home)
+#   /opt/data/plugins/omh                     plugin bridge loaded by the gateway
+#
+#   omh doctor                    # health check (blocking / warning checks)
+#   omh model-chains show         # per-category model chains
+#   omh update                    # refresh OMH (then: sudo command-center hermes restart)
+#
+# /usr/local/bin/omh → /srv/command-center/bin/omh. Needs root or the docker group.
+set -euo pipefail
+
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+load_env
+
+OMH_BIN=/opt/data/.local/bin/omh
+
+[ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" = true ] \
+  || die "hermes-agent is not running (sudo command-center hermes status)"
+
+cwd="$HERMES_WORKSPACE_DIR"
+here="$(pwd -P 2>/dev/null || true)"
+case "$here/" in "$HERMES_WORKSPACE_DIR"/*) cwd="$here" ;; esac
+
+tty=(-i)
+[ -t 0 ] && [ -t 1 ] && tty=(-it)
+
+exec docker exec "${tty[@]}" -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home \
+  -e HERMES_HOME=/opt/data -e TERM="${TERM:-xterm}" ${COLORTERM:+-e COLORTERM="$COLORTERM"} \
+  -w "$cwd" hermes-agent "$OMH_BIN" "$@"
