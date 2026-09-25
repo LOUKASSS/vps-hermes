@@ -210,6 +210,23 @@ _agent_cmd() {
 agent_exec() { _agent_cmd "$@"; }
 agent_run() { _agent_cmd "$@"; }
 
+# hermes_py <code> [args…] — Python with Hermes' dependencies loaded, as the agent. Native releases:
+# pm's interpreter + hermes_bootstrap (what the .hermes/bin/hermes launcher does); legacy: the .venv.
+hermes_py() {
+  local code="$1" app; shift
+  app="$(readlink -f "$HERMES_CURRENT")"
+  if [ -x "$app/.venv/bin/python" ]; then
+    agent_run "$app/.venv/bin/python" -c "$code" "$@"
+  else
+    agent_run "$app/.hostbin/python3" -I -c 'import os, sys
+app, code = sys.argv[1], sys.argv[2]; del sys.argv[1:3]
+for k in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"): os.environ.pop(k, None)
+sys.path.insert(0, app)
+import hermes_bootstrap  # noqa: F401 — puts the release environment on sys.path
+exec(compile(code, "<hermes_py>", "exec"))' "$app" "$code" "$@"
+  fi
+}
+
 # agent_wrapper_init — for bin/hermes and bin/omh, run by the operator without the stack .env
 # (root-only): the workspace comes from agent.env; AGENT_CWD = the current directory when it is
 # inside the workspace, else the workspace root.
