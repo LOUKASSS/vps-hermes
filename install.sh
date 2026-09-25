@@ -124,10 +124,11 @@ chown 0:0 "$TRAEFIK_DIR" "$TRAEFIK_DIR/acme.json"; chmod 600 "$TRAEFIK_DIR/acme.
 chown -R "$HERMES_UID:$HERMES_GID" "$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR"
 # Credentials live here (OAuth tokens under data/home, Obsidian login under obsidian/): owner only.
 chmod 700 "$HERMES_DATA_DIR" "$HERMES_DATA_DIR/home" "$OBSIDIAN_DIR" "$TRAEFIK_DIR"
-# .env belongs to the operator (harden.sh already made them own the whole checkout, so day-to-day
-# `docker compose` / `git pull` work without sudo). The rest of the repo is deliberately left
-# alone: chown -R on .git would make root's git refuse the repo ("dubious ownership").
-chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
+# .env (Cloudflare token, B2 keys, restic password…) is root's: Hermes runs as the operator user,
+# and every reader of .env runs as root (sudo command-center …). The rest of the repo stays the
+# operator's (harden.sh; `git pull` without sudo): chown -R on .git would make root's git refuse
+# the repo ("dubious ownership").
+chown 0:0 .env; chmod 600 .env
 
 # Seed config.yaml BEFORE the first compose up — otherwise the image writes the
 # upstream Hermes seed (_config_version, no MCP, multiplex on).
@@ -141,26 +142,39 @@ if [ ! -f "$HERMES_DATA_DIR/config.yaml" ]; then
   install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/config.yaml" "$HERMES_DATA_DIR/config.yaml"
 fi
 
-# ── 4. Build + start ─────────────────────────────────────────────────────
-# Keep heal.sh (timer, every minute) out of the way while containers are (re)created.
+# ── 4. Hermes on the host + platform containers ─────────────────────────
+# Keep heal.sh (timer, every minute) out of the way while services are (re)started.
 if [ "${ALLOW_NON_ROOT:-}" != 1 ]; then
   lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
 fi
-info "Building agent image with coding CLIs…"
-compose build --pull hermes-agent
-info "Pulling remaining images…"
+# A re-run keeps the active release (update.sh moves it forward); a fresh VPS builds HERMES_REF.
+if [ ! -e "$HERMES_CURRENT/.release" ]; then
+  info "Building the Hermes release (HERMES_REF=${HERMES_REF:-main})…"
+  _rel="$("$STACK_DIR/hermes-host.sh" build | tail -n1)"
+  [ -n "$_rel" ] || die "Hermes build failed"
+  "$STACK_DIR/hermes-host.sh" activate "$_rel" || true   # writes the units; the first start is verified below
+fi
+info "Writing /etc/hermes/agent.env, the systemd units, the Traefik route…"
+"$STACK_DIR/hermes-host.sh" units
+info "Pulling platform images…"
 compose pull --ignore-buildable
-info "Starting stack…"
+info "Starting platform containers…"
 compose up -d --remove-orphans
+systemctl start hermes-gateway.service hermes-dashboard.service
 
 # ── 5. Wait for health + first-boot config ───────────────────────────────
-info "Waiting for hermes-agent to become healthy (up to 3 min)…"
-wait_healthy hermes-agent 180 || { compose logs --tail=50 hermes-agent; die "hermes-agent not healthy after 3 min."; }
+info "Waiting for Hermes to be healthy (up to 3 min)…"
+agent_wait_healthy 180 || { journalctl -u hermes-gateway -u hermes-dashboard -n 50 --no-pager -o cat; die "Hermes not healthy after 3 min."; }
 
-# Point the agent's terminal at the shared workspace — its host path, mounted at the same path.
+# Point the agent's terminal at the shared workspace, and keep its tool subprocesses on its own
+# HOME (/opt/data/home: its CLI logins), not the operator's — `auto` would pick the real HOME on a host.
 if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]')" != "$HERMES_WORKSPACE_DIR" ]; then
   info "Setting terminal.cwd = $HERMES_WORKSPACE_DIR"
   agent_run hermes config set terminal.cwd "$HERMES_WORKSPACE_DIR" >/dev/null
+fi
+if [ "$(agent_run hermes config get terminal.home_mode 2>/dev/null | tr -d '[:space:]')" != profile ]; then
+  info "Setting terminal.home_mode = profile"
+  agent_run hermes config set terminal.home_mode profile >/dev/null
 fi
 
 # ── 5b. Default agent (skills, SOUL, health MCP) ─────────────────────────
@@ -172,20 +186,20 @@ if [ "${ALLOW_NON_ROOT:-0}" != 1 ]; then
 fi
 
 # Hermes layers its external secret sources (config.yaml secrets.*, e.g. Bitwarden Secrets Manager)
-# over the container env at startup, so HERMES_DASHBOARD_BASIC_AUTH_* coming from there silently
-# replace DESKTOP_USERNAME/DESKTOP_PASSWORD. Try the .env credentials for real (from inside the
-# container, credentials on stdin) and print the ones the dashboard actually accepts.
+# over its env at startup, so HERMES_DASHBOARD_BASIC_AUTH_* coming from there silently replace
+# DESKTOP_USERNAME/DESKTOP_PASSWORD. Try the .env credentials for real (as the agent, credentials
+# on stdin) and print the ones the dashboard actually accepts.
 dash_login="user ${DESKTOP_USERNAME} / password ${DESKTOP_PASSWORD}   (DESKTOP_* in .env)"
 _code="$(printf '%s\n%s\n' "$DESKTOP_USERNAME" "$DESKTOP_PASSWORD" | agent_run python3 -c '
 import json, sys, urllib.request, urllib.error
 u, p = sys.stdin.read().split("\n")[:2]
-req = urllib.request.Request("http://127.0.0.1:%s/auth/password-login" % sys.argv[1], method="POST",
+req = urllib.request.Request("http://%s:%s/auth/password-login" % (sys.argv[1], sys.argv[2]), method="POST",
     data=json.dumps({"provider": "basic", "username": u, "password": p, "next": "/"}).encode(),
     headers={"Content-Type": "application/json"})
 try: print(urllib.request.urlopen(req, timeout=10).status)
 except urllib.error.HTTPError as e: print(e.code)
 except Exception: print(0)
-' "${DESKTOP_PORT:-9120}" 2>/dev/null || echo 0)"
+' "${DESKTOP_BIND:-127.0.0.1}" "${DESKTOP_PORT:-9120}" 2>/dev/null || echo 0)"
 case "$_code" in
   200) ;;
   401)
@@ -204,7 +218,7 @@ if [ "${ALLOW_NON_ROOT:-0}" != 1 ] && command -v systemctl >/dev/null 2>&1; then
   docker_wait_for_tailscale   # ports bind DESKTOP_BIND: dockerd must not start before tailscaled has the IP
   systemctl daemon-reload
   ln -sfn "$STACK_DIR/command-center" /usr/local/bin/command-center
-  ln -sfn "$STACK_DIR/bin/hermes" /usr/local/bin/hermes   # host `hermes` → CLI in hermes-agent
+  ln -sfn "$STACK_DIR/bin/hermes" /usr/local/bin/hermes   # host `hermes` → the active release, as the agent
   systemctl enable --now hermes-update.timer hermes-heal.timer >/dev/null
   if [ -n "$(env_val B2_ACCOUNT_KEY)" ] && [ -n "$(env_val RESTIC_PASSWORD)" ]; then
     systemctl enable --now hermes-backup.timer >/dev/null
@@ -225,13 +239,14 @@ cat <<MSG
                   "Restrict to domain" → ${DNS_ZONE}. Then every tailnet device resolves the URL.
   Hermes Desktop: Settings → Gateways → Remote gateway → https://${HERMES_HOST} (or http://${DESKTOP_BIND}:${DESKTOP_PORT:-9120}),
                   same user / password
-  PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses hermes-postgres:5432 via PG* / DATABASE_URL)
+  PostgreSQL    : postgresql://${POSTGRES_USER}:<POSTGRES_PASSWORD in .env>@${DESKTOP_BIND}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}   (tailnet; the agent uses 127.0.0.1:${POSTGRES_PORT:-5432} via PG* / DATABASE_URL)
   Agent         : default (sudo ./agent.sh status) — skills in ${HERMES_DATA_DIR}/skills, MCP in ${HERMES_DATA_DIR}/mcp
   Data dir      : ${HERMES_DATA_DIR}   (config, sessions, credentials, skills, private/)
-  Workspace     : ${HERMES_WORKSPACE_DIR}   (same path in the agent, Orca, herdr; /workspace = alias)
+  Hermes        : on the host — hermes-gateway + hermes-dashboard (systemd), release $(basename "$(readlink -f "$HERMES_CURRENT")")
+  Workspace     : ${HERMES_WORKSPACE_DIR}   (Hermes, Orca, herdr, SSH; /workspace = alias)
   Backups       : ${backup_note}
-  Updates       : nightly, 04:00 (hermes-update.timer) — images + CLIs, tested first, auto-rollback; undo: sudo ./update.sh rollback
-  Healer        : hermes-heal.timer (every minute: restart unhealthy, start exited; touch .maintenance to pause)
+  Updates       : nightly, 04:00 (hermes-update.timer) — images, Hermes release, CLIs; tested first, auto-rollback; undo: sudo ./update.sh rollback
+  Healer        : hermes-heal.timer (every minute: restart unhealthy containers / a hung Hermes; touch .maintenance to pause)
 
   These secrets are also in .env (mode 600). Clear this terminal's scrollback if it is shared or logged.
 

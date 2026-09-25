@@ -1,34 +1,23 @@
 #!/usr/bin/env bash
-# `hermes` on the host → the Hermes CLI inside the hermes-agent container.
+# `hermes` on the host → the Hermes CLI of the active release (/opt/hermes), as the gateway runs it.
 #
-# Same user, HOME and config as the gateway and `command-center hermes chat` (agent_exec):
-# runtime uid, HOME=/opt/data/home, HERMES_HOME=/opt/data. cwd = the current directory when it
-# is inside the shared workspace (same absolute path in the container), else the workspace root.
+# Same user, config and environment as the gateway and `command-center hermes chat` (agent_exec):
+# the operator user, /etc/hermes/agent.env, HOME=/opt/data/home (the agent's own CLI logins),
+# HERMES_HOME=/opt/data. cwd = the current directory when it is inside the shared workspace, else
+# the workspace root.
 #
 #   hermes                        # interactive CLI
 #   hermes chat --resume <id>     # any hermes subcommand / flags
-#   hermes chat -q "…" --oneshot  # scripts / pipes work too (no TTY allocated when not on a terminal)
+#   hermes chat -q "…" --oneshot  # scripts / pipes work too
 #
-# /usr/local/bin/hermes → /srv/command-center/bin/hermes (install.sh). Needs root or the docker group.
+# /usr/local/bin/hermes → /srv/command-center/bin/hermes (hermes-host.sh). Root or the operator user.
 set -euo pipefail
 
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
-load_env
+agent_wrapper_init
+[ -e "$HERMES_CURRENT/.release" ] || die "no active Hermes release in $HERMES_CURRENT (sudo command-center hermes status)"
 
-[ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" = true ] \
-  || die "hermes-agent is not running (sudo command-center hermes status)"
-
-cwd="$HERMES_WORKSPACE_DIR"
-here="$(pwd -P 2>/dev/null || true)"
-case "$here/" in "$HERMES_WORKSPACE_DIR"/*) cwd="$here" ;; esac
-
-tty=(-i)
-[ -t 0 ] && [ -t 1 ] && tty=(-it)
-
-# No `exec`: this script — a process named `hermes` — stays in the terminal's foreground next to
-# docker, which is how herdr recognises the agent and tracks idle / working / blocked (update.sh
-# waits for it). Its exit status is docker's, i.e. the CLI's.
-docker exec "${tty[@]}" -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home \
-  -e TERM="${TERM:-xterm}" ${COLORTERM:+-e COLORTERM="$COLORTERM"} \
-  -w "$cwd" hermes-agent hermes "$@"
+# No `exec`: this script — a process named `hermes` — stays in the terminal's foreground, which is
+# how herdr recognises the agent and tracks idle / working / blocked. Its exit status is the CLI's.
+agent_exec hermes "$@"

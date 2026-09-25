@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# Nightly update of the Docker images and the coding CLIs (hermes-update.timer, 04:00), arranged
-# so that a bad release never leaves a service down:
+# Nightly update of the platform images, Hermes (host release) and the coding CLIs
+# (hermes-update.timer, 04:00), arranged so that a bad release never leaves a service down:
 #
-#   1. preflight  hermes-agent healthy, no hold, enough disk → otherwise nothing is touched
-#   2. stage      the agent image is built as :candidate (never over :latest) and smoke-tested
-#                 (hermes, claude, codex, grok, gh must start); public images are pulled. Any
-#                 failure here puts every tag back — no container is recreated.
-#   3. compare    same agent content (tool versions, OS and npm packages) and same digests →
-#                 nothing is recreated; a version that already failed here is not retried
-#                 (a newer one is)
-#   3b. busy gate hermes-agent is recreated only when Hermes is not working (herdr panes where it
-#                 is working/blocked, gateway turns, cron jobs, kanban runs, delegations): waits up
-#                 to UPDATE_BUSY_WAIT, then skips the night and notifies. Once idle, Hermes is
-#                 paused (no new gateway/cron/kanban work) until the swap is over, and the Hermes
-#                 CLIs open in herdr are resumed in their panes (`hermes --resume <id>`) afterwards
-#   4. swap       only the services whose image changed are recreated; the image each one ran
-#                 before becomes :previous
-#   5. verify     every service that was OK before must be running + healthy within
-#                 UPDATE_VERIFY_TIMEOUT and still be UPDATE_SETTLE s later → otherwise automatic
-#                 rollback to :previous, and the new versions are remembered in .update-failed
-#   6. host       orca.sh update (CLIs + Orca release, each with its own rollback), herdr.sh update
+#   1. preflight  no hold, enough disk → otherwise nothing is touched
+#   2. images     public images are pulled (every tag put back on failure); same digests →
+#                 nothing recreated; only the services whose image changed are recreated (what
+#                 they ran becomes :previous); every service that was OK before must be healthy
+#                 within UPDATE_VERIFY_TIMEOUT and still UPDATE_SETTLE s later → otherwise
+#                 automatic rollback to :previous, the new versions remembered in .update-failed
+#   3. Hermes     the release for HERMES_REF (default main) is built next to the running one
+#                 (hermes-host.sh build: nothing restarts; smoke-tested) — skipped when it is the
+#                 active one, or already failed here (a newer commit is tried)
+#      busy gate  the switch waits until Hermes is not working (gateway turns, cron jobs, kanban
+#                 runs, delegations — Hermes CLIs are never cut): up to UPDATE_BUSY_WAIT, then the
+#                 night is skipped and notified. Once idle, Hermes is paused (no new gateway /
+#                 cron / kanban work) until the switch is over
+#      switch     /opt/hermes → the new release, services restarted; healthy within
+#                 UPDATE_VERIFY_TIMEOUT and still UPDATE_SETTLE s later → otherwise back to the
+#                 previous release, the commit remembered in .update-failed
+#   4. host       orca.sh update (coding CLIs — the agent's too — + Orca release, each with its
+#                 own rollback), herdr.sh update
 #
 #   sudo ./update.sh              # what hermes-update.timer runs (every night, 04:00)
-#   sudo ./update.sh check        # steps 1–3 only: build, test, report what would change; recreates nothing
-#   sudo ./update.sh rollback     # back to the images that ran before the last update, and hold
+#   sudo ./update.sh check        # pull + build, report what would change; restarts nothing
+#   sudo ./update.sh rollback     # back to the images and the Hermes release that ran before, and hold
 #   sudo ./update.sh resume       # lift the hold and forget the failed versions
 #   sudo ./update.sh --force      # update even while on hold, retrying failed versions, without
-#                                 # waiting for Hermes to be idle (its sessions are still resumed)
+#                                 # waiting for Hermes to be idle
 #   sudo ./update.sh busy         # what Hermes is working on right now (exit 1 when busy)
 #
 # Result of the last run: state/last-update (shown by `command-center status`). Set
@@ -39,13 +39,14 @@ need_root
 load_env
 cd "$STACK_DIR"
 
-UPDATE_FAILED="$STACK_DIR/.update-failed"    # "<image ref> <image id | agent fingerprint> <date>"
+UPDATE_FAILED="$STACK_DIR/.update-failed"    # "<image ref | hermes-release> <image id | commit sha> <date>"
 UPDATE_STATUS="$STACK_DIR/state/last-update"
 : "${UPDATE_VERIFY_TIMEOUT:=420}"   # obsidian-sync's healthcheck start_period is 300 s
 : "${UPDATE_SETTLE:=60}"            # healthy must survive this long (crash loop after the first check)
 : "${UPDATE_MIN_FREE_GB:=10}"
-: "${UPDATE_BUSY_WAIT:=3600}"       # how long a busy Hermes may delay the recreate before the night is skipped
-AGENT_SVC=hermes-agent
+: "${UPDATE_BUSY_WAIT:=3600}"       # how long a busy Hermes may delay the switch before the night is skipped
+HERMES_HOST_SH="$STACK_DIR/hermes-host.sh"
+AGENT_KEY=hermes-release            # its key in .update-failed
 
 # Every image reference the enabled services use (+ restic, which is not a compose service).
 image_refs() {
@@ -64,7 +65,14 @@ tag_as() { echo "${1%:*}:$2"; }
 prev_tag() { tag_as "$1" previous; }
 image_id() { docker image inspect -f '{{.Id}}' "$1" 2>/dev/null; }
 
-record() { install -d -m 0755 "$STACK_DIR/state"; printf '%s %s\n' "$(date -Is)" "$*" > "$UPDATE_STATUS"; }
+# One status line for the run (images · Hermes), rewritten as each step reports.
+STATUS=()
+record() {
+  local line="" part
+  STATUS+=("$*")
+  for part in "${STATUS[@]}"; do line="${line:+$line · }$part"; done
+  install -d -m 0755 "$STACK_DIR/state"; printf '%s %s\n' "$(date -Is)" "$line" > "$UPDATE_STATUS"
+}
 
 # First cut-over only: custom hermes-dns / obsidian-sync images must be reachable
 # as the public images' :previous tags so do_rollback can retag
@@ -132,25 +140,10 @@ snapshot_running() {
 # Every ref back to what ran before this run (stage failed, check mode, or a known-bad version).
 restore_ref() { local pre; pre="$(tag_as "$1" pre-update)"; ! docker image inspect "$pre" >/dev/null 2>&1 || docker tag "$pre" "$1"; }
 restore_refs() { local img; for img in $(image_refs); do restore_ref "$img"; done; }
-# Drop the :pre-update / :candidate tags (the images keep their other tags).
+# Drop the :pre-update tags (the images keep their other tags).
 drop_staging() {
   local img
   for img in $(image_refs); do docker image rm "$(tag_as "$img" pre-update)" >/dev/null 2>&1 || true; done
-  docker image rm "$AGENT_CANDIDATE" >/dev/null 2>&1 || true
-}
-
-# probe_agent <image> — start every tool of the agent image once (smoke test) and hash what an
-# update can change: upstream revision, tool versions, OS and global npm packages. Sets PROBE_FP
-# (hash) and PROBE_VER (one-line summary). Offline, throwaway container, nothing mounted.
-probe_agent() {
-  local out
-  if ! out="$(timeout 180 docker run --rm --network none --entrypoint sh "$1" -c \
-      'set -e; hermes --version; claude --version; codex --version; grok --version; gh --version; dpkg-query -W; npm ls -g --depth=0' 2>&1)"; then
-    printf '%s\n' "$out" | tail -n 20 >&2
-    return 1
-  fi
-  PROBE_FP="$(printf '%s' "$out" | sha256sum | cut -c1-16)"
-  PROBE_VER="$(printf '%s\n' "$out" | sed -n '1s/^Hermes Agent //p; /(Claude Code)$/p; /^codex-cli /p; /^grok /p; /^gh version /s/ (.*//p' | paste -sd'|' | sed 's/|/ · /g')"
 }
 
 is_failed() { [ "${FORCE:-0}" != 1 ] && grep -qsF "$1 $2 " "$UPDATE_FAILED"; }
@@ -181,7 +174,7 @@ wait_ok() {
 }
 
 do_rollback() {
-  local img prev n=0 fallback
+  local img prev n=0 fallback agent_prev=0 busy
   for img in $(image_refs); do
     prev="$(prev_tag "$img")"
     if ! docker image inspect "$prev" >/dev/null 2>&1; then
@@ -197,17 +190,21 @@ do_rollback() {
     docker image inspect "$prev" >/dev/null 2>&1 || { warn "no previous image for $img"; continue; }
     docker tag "$prev" "$img"; n=$((n + 1))
   done
-  [ "$n" -gt 0 ] || die "nothing to roll back to (no :previous tags)"
-  local busy; busy="$(hermes_busy)"
+  [ -e "$HERMES_RELEASES/previous/.release" ] && agent_prev=1
+  [ "$n" -gt 0 ] || [ "$agent_prev" = 1 ] || die "nothing to roll back to (no :previous tags, no previous Hermes release)"
+  busy="$(hermes_busy)"
   [ -z "$busy" ] || warn "rolling back although Hermes is working (cut): ${busy//$'\n'/; }"
-  hermes_panes_snapshot
-  info "Recreating containers on the previous images…"
-  compose up -d --force-recreate --no-build --remove-orphans
+  if [ "$n" -gt 0 ]; then
+    info "Recreating containers on the previous images…"
+    compose up -d --force-recreate --no-build --remove-orphans
+  fi
+  if [ "$agent_prev" = 1 ]; then
+    info "Hermes: back to the previous release…"
+    "$HERMES_HOST_SH" rollback || warn "Hermes not healthy after the rollback"
+  fi
   date -Is > "$UPDATE_HOLD"
-  wait_healthy hermes-agent 180 || warn "hermes-agent still not healthy after the rollback"
   compose ps
-  hermes_sessions_restore
-  record "manual rollback to :previous — automatic updates on hold"
+  record "manual rollback to :previous / previous Hermes release — automatic updates on hold"
   warn "Automatic updates are ON HOLD ($UPDATE_HOLD). When ready: sudo $0 resume"
 }
 
@@ -222,10 +219,10 @@ auto_rollback() {
     mark_failed "$ref" "${NEW_KEY[$ref]}"
   done
   if compose up -d --no-build --no-deps --force-recreate "${CHANGED_SVC[@]}" && wait_ok "$UPDATE_VERIFY_TIMEOUT" "${CHECK_SVC[@]}"; then
-    record "ROLLED BACK ($why): ${SUMMARY[*]}"
+    record "images ROLLED BACK ($why): ${SUMMARY[*]}"
     notify "update.sh: $why — rolled back to the previous images (${CHANGED_SVC[*]}). The failed versions are skipped until newer ones ship. journalctl -u hermes-update"
   else
-    record "ROLLBACK FAILED ($why) — not OK: ${BAD:-?}"
+    record "images ROLLBACK FAILED ($why) — not OK: ${BAD:-?}"
     notify "update.sh: $why, and the rollback did not bring back: ${BAD:-?}. Check the VPS: journalctl -u hermes-update, docker compose ps"
   fi
   NOTIFIED=1
@@ -233,33 +230,33 @@ auto_rollback() {
   exit 1
 }
 
-# ── 3b. busy gate: hermes-agent is recreated only when no Hermes work would be cut. Waits (without
-# UPDATE_LOCK, so heal.sh keeps watching the stack) until idle or UPDATE_BUSY_WAIT is spent — then
-# the night is skipped: exit 0, on_exit puts every tag back. Idle → pause Hermes (no new gateway /
-# cron / kanban work) and check again: what started in between is let finish. --force: no wait.
+# Busy gate before the Hermes switch. Waits (without UPDATE_LOCK, so heal.sh keeps watching)
+# until idle or UPDATE_BUSY_WAIT is spent — then the switch is skipped for the night (return 1).
+# Idle → pause Hermes (no new gateway / cron / kanban work) and check again: what started in
+# between is let finish. --force: no wait.
 gate_agent_idle() {
   local deadline=$((SECONDS + UPDATE_BUSY_WAIT)) busy
   while :; do
     if [ "${FORCE:-0}" != 1 ]; then
       flock -u 8; UPDATE_LOCKED=0
       if ! hermes_wait_idle "$deadline"; then
-        record "skipped: Hermes still working after $((UPDATE_BUSY_WAIT / 60)) min — ${HERMES_BUSY//$'\n'/; }"
+        record "Hermes skipped: still working after $((UPDATE_BUSY_WAIT / 60)) min — ${HERMES_BUSY//$'\n'/; }"
         NOTIFIED=1
-        notify "update.sh: night skipped, hermes-agent NOT updated — Hermes was still working after waiting $((UPDATE_BUSY_WAIT / 60)) min: ${HERMES_BUSY//$'\n'/; }. Next try: tomorrow 04:00, or now: sudo $STACK_DIR/update.sh --force"
-        warn "Hermes still working after $((UPDATE_BUSY_WAIT / 60)) min — night skipped, nothing recreated"
-        exit 0
+        notify "update.sh: Hermes NOT updated tonight — it was still working after waiting $((UPDATE_BUSY_WAIT / 60)) min: ${HERMES_BUSY//$'\n'/; }. Next try: tomorrow 04:00, or now: sudo $STACK_DIR/update.sh --force"
+        warn "Hermes still working after $((UPDATE_BUSY_WAIT / 60)) min — switch skipped"
+        return 1
       fi
       lock_update -w 600 || die "heal.sh held $UPDATE_LOCK for 10 min after the wait — try again"
-      if [ -n "$(which_bad "$AGENT_SVC")" ]; then
-        record "skipped: $AGENT_SVC not healthy after waiting for Hermes to be idle (heal.sh handles it)"
-        warn "$AGENT_SVC is not healthy any more — not updating a stack that is sick"
-        exit 0
+      if ! agent_healthy; then
+        record "Hermes skipped: not healthy after waiting for it to be idle (heal.sh handles it)"
+        warn "Hermes is not healthy any more — not switching a sick agent"
+        return 1
       fi
     fi
-    hermes_pause "hermes-agent is being updated (a few minutes)"
+    hermes_pause "Hermes is being updated (a few minutes)"
     busy="$(hermes_busy)"
     if [ -z "$busy" ] || [ "${FORCE:-0}" = 1 ]; then
-      [ -z "$busy" ] || warn "--force: recreating $AGENT_SVC although Hermes is working: ${busy//$'\n'/; }"
+      [ -z "$busy" ] || warn "--force: switching Hermes although it is working: ${busy//$'\n'/; }"
       return 0
     fi
     hermes_unpause
@@ -272,86 +269,27 @@ on_exit() {
     restore_refs
     drop_staging
   fi
-  hermes_sessions_restore || true   # lift our pause, resume herdr's Hermes CLIs (no-op when nothing pending)
+  hermes_unpause || true   # lift our pause (no-op when we did not set one)
   if [ "$rc" -ne 0 ] && [ "${NOTIFIED:-0}" != 1 ]; then
     [ "${STAGED:-0}" = 1 ] && record "FAILED before any change (exit $rc) — services untouched"
     notify "update.sh failed (exit $rc) — journalctl -u hermes-update"
   fi
 }
 
-do_update() {
-  local mode="${1:-}" ref s old new cur_fp
-  [ "$mode" = --force ] && FORCE=1
-  # This compose must not land on the live checkout before migrate-single-agent.sh
-  # has removed data/active_profile. Recreating hermes-agent with `hermes gateway run`
-  # while the sticky named profile is set steals 127.0.0.1:8642; /health stays 200
-  # so wait_healthy would not roll back. --force does not bypass this.
-  if [ -e "${HERMES_DATA_DIR}/active_profile" ]; then
-    die "refusing update: ${HERMES_DATA_DIR}/active_profile exists — run migrate-single-agent.sh first (this compose must not recreate hermes-agent until the sticky profile is gone)"
-  fi
-  if [ -e "$UPDATE_HOLD" ] && [ "$mode" = "" ]; then
-    warn "updates on hold since $(cat "$UPDATE_HOLD") (after a rollback). Lift with: sudo $0 resume — or: sudo $0 --force"
-    exit 0
-  fi
-  # heal.sh holds this lock for up to ~3 min while it recreates hermes-agent; wait, do not skip silently.
-  lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
-  trap on_exit EXIT
-
-  # ── 1. preflight ──
-  local before_bad free_gb
+# ── 2. images ──
+update_images() {
+  local mode="$1" before_bad ref s old new
   before_bad="$(bad_services)"
-  if grep -qx "$AGENT_SVC" <<<"$before_bad"; then
-    record "skipped: $AGENT_SVC not healthy before the update (heal.sh handles it)"
-    warn "$AGENT_SVC is not healthy — not updating a stack that is already sick"
-    exit 0
-  fi
   [ -z "$before_bad" ] || warn "not OK before the update, so not verified after it: ${before_bad//$'\n'/ }"
-  free_gb="$(df --output=avail -BG "$(docker info -f '{{.DockerRootDir}}')" | tail -n1 | tr -dc 0-9)"
-  if [ "${free_gb:-0}" -lt "$UPDATE_MIN_FREE_GB" ]; then
-    record "skipped: only ${free_gb} GB free (< $UPDATE_MIN_FREE_GB)"
-    die "only ${free_gb} GB free for Docker — not building (UPDATE_MIN_FREE_GB=$UPDATE_MIN_FREE_GB)"
-  fi
-  AGENT_IMAGE="$(service_images | awk -v s="$AGENT_SVC" '$1 == s { print $2 }')"
-  [ -n "$AGENT_IMAGE" ] || die "no image for $AGENT_SVC in the compose config"
-  AGENT_CANDIDATE="$(tag_as "$AGENT_IMAGE" candidate)"
-
-  # ── 2. stage: nothing running is touched; any failure → on_exit restores every tag ──
   STAGED=1
   snapshot_running
-  # --no-cache: re-run the npm layer even if the base image digest is unchanged, so unpinned
-  # coding CLIs advance. Built under :candidate — :latest (what a recreate would use) stays put.
-  info "Building the agent image (latest base + coding CLIs) as $AGENT_CANDIDATE…"
-  local out
-  if ! out="$(docker build --pull --no-cache --progress=plain -t "$AGENT_CANDIDATE" "$STACK_DIR/hermes" 2>&1)"; then
-    printf '%s\n' "$out" | tail -n 40 >&2
-    record "FAILED: agent image build — services untouched"; NOTIFIED=1
-    notify "update.sh: the agent image build failed — nothing was changed, the current version keeps running. journalctl -u hermes-update"
-    die "agent image build failed — nothing changed"
-  fi
   info "Pulling public images (traefik, postgres, dns, obsidian, proxy, restic)…"
   compose pull --ignore-buildable --ignore-pull-failures --quiet || warn "some images could not be pulled — they stay on their current version"
   docker pull -q "$RESTIC_IMAGE" >/dev/null || warn "could not pull $RESTIC_IMAGE"
 
-  # ── 3. compare + smoke test ──
-  if ! probe_agent "$AGENT_CANDIDATE"; then
-    record "FAILED: new agent image smoke test (a tool does not start) — services untouched"; NOTIFIED=1
-    notify "update.sh: the new agent image fails its smoke test (hermes/claude/codex/grok/gh) — not deployed, the current version keeps running."
-    die "the new agent image fails its smoke test — not deployed"
-  fi
-  local cand_fp="$PROBE_FP" cand_ver="$PROBE_VER"
-  cur_fp=none; PROBE_VER="?"
-  probe_agent "$(tag_as "$AGENT_IMAGE" pre-update)" 2>/dev/null && cur_fp="$PROBE_FP"
-  local cur_ver="$PROBE_VER"
-
   CHANGED_REFS=(); CHANGED_SVC=(); SUMMARY=(); declare -gA NEW_KEY=()
   local -a skipped=()
   for ref in $(image_refs); do
-    if [ "$ref" = "$AGENT_IMAGE" ]; then
-      [ "$cand_fp" != "$cur_fp" ] || continue
-      if is_failed "$ref" "$cand_fp"; then skipped+=("agent ($cand_ver)"); continue; fi
-      NEW_KEY["$ref"]="$cand_fp"; CHANGED_REFS+=("$ref"); SUMMARY+=("agent: $cur_ver → $cand_ver")
-      continue
-    fi
     old="$(image_id "$(tag_as "$ref" pre-update)")" || continue
     new="$(image_id "$ref")" || continue
     [ "$old" != "$new" ] || continue
@@ -363,53 +301,116 @@ do_update() {
   done < <(service_images)
   [ "${#skipped[@]}" -eq 0 ] || warn "already failed here, skipped until a newer version ships: ${skipped[*]} (retry: sudo $0 --force)"
 
-  local recreate_agent=0
-  for s in "${CHANGED_SVC[@]}"; do [ "$s" != "$AGENT_SVC" ] || recreate_agent=1; done
   if [ "$mode" = check ]; then
-    info "check: agent now: $cur_ver"
-    if [ "${#CHANGED_REFS[@]}" -eq 0 ]; then info "check: nothing to update"
-    else info "check: would update → ${SUMMARY[*]}"; info "check: would recreate → ${CHANGED_SVC[*]:-none}"; fi
-    local busy; busy="$(hermes_busy)"
-    if [ -z "$busy" ]; then info "check: Hermes is idle"
-    else
-      if [ "$recreate_agent" = 1 ]; then info "check: Hermes is working — the update would wait (≤ $((UPDATE_BUSY_WAIT / 60)) min) before recreating $AGENT_SVC:"
-      else info "check: Hermes is working ($AGENT_SVC would not be recreated, so it would not be cut):"; fi
-      printf '%s\n' "$busy" | sed 's/^/  /'
-    fi
-    return 0   # on_exit puts every tag back
+    if [ "${#CHANGED_REFS[@]}" -eq 0 ]; then info "check: images: nothing to update"
+    else info "check: images would update → ${SUMMARY[*]}"; info "check: would recreate → ${CHANGED_SVC[*]:-none}"; fi
+    restore_refs; drop_staging; STAGED=0
+    return 0
   fi
-  [ "$recreate_agent" = 0 ] || gate_agent_idle
   if [ "${#CHANGED_REFS[@]}" -eq 0 ]; then
     info "Images: nothing new${skipped[*]:+ (skipped: ${skipped[*]})}"
-    record "ok: images unchanged${skipped[*]:+, skipped known-bad: ${skipped[*]}}"
+    record "images unchanged${skipped[*]:+, skipped known-bad: ${skipped[*]}}"
     restore_refs; drop_staging; STAGED=0
-  else
-    # ── 4. swap: what ran before becomes :previous (only for what changes) ──
-    for ref in "${CHANGED_REFS[@]}"; do docker tag "$(tag_as "$ref" pre-update)" "$(prev_tag "$ref")"; done
-    map_cutover_previous
-    [ -z "${NEW_KEY[$AGENT_IMAGE]:-}" ] || docker tag "$AGENT_CANDIDATE" "$AGENT_IMAGE"
-    drop_staging; STAGED=0
-    CHECK_SVC=()
-    for s in $(compose config --services); do grep -qx "$s" <<<"$before_bad" || CHECK_SVC+=("$s"); done
-    info "Updating: ${SUMMARY[*]}"
-    if [ "${#CHANGED_SVC[@]}" -gt 0 ]; then
-      info "Recreating ${CHANGED_SVC[*]} (the other services are left running)…"
-      [ "$recreate_agent" = 0 ] || hermes_panes_snapshot   # resumed by hermes_sessions_restore (here or on_exit)
-      compose up -d --no-build --no-deps "${CHANGED_SVC[@]}" || { BAD="${CHANGED_SVC[*]}"; auto_rollback "docker compose up failed"; }
-      # ── 5. verify ──
-      info "Waiting for every service to be healthy (≤ ${UPDATE_VERIFY_TIMEOUT} s, then ${UPDATE_SETTLE} s stable)…"
-      wait_ok "$UPDATE_VERIFY_TIMEOUT" "${CHECK_SVC[@]}" || auto_rollback "not healthy after the update: ${BAD//$'\n'/ }"
-    fi
-    rm -f "$UPDATE_HOLD"
-    record "ok: ${SUMMARY[*]}"
-    info "Update OK"
-    compose ps
-    hermes_sessions_restore
+    return 0
   fi
-  docker image prune -f >/dev/null
-  docker builder prune -f --max-used-space 4g >/dev/null 2>&1 || docker builder prune -f --keep-storage 4g >/dev/null 2>&1 || true
+  # swap: what ran before becomes :previous (only for what changes)
+  for ref in "${CHANGED_REFS[@]}"; do docker tag "$(tag_as "$ref" pre-update)" "$(prev_tag "$ref")"; done
+  map_cutover_previous
+  drop_staging; STAGED=0
+  CHECK_SVC=()
+  for s in $(compose config --services); do grep -qx "$s" <<<"$before_bad" || CHECK_SVC+=("$s"); done
+  info "Updating: ${SUMMARY[*]}"
+  if [ "${#CHANGED_SVC[@]}" -gt 0 ]; then
+    info "Recreating ${CHANGED_SVC[*]} (the other services are left running)…"
+    compose up -d --no-build --no-deps "${CHANGED_SVC[@]}" || { BAD="${CHANGED_SVC[*]}"; auto_rollback "docker compose up failed"; }
+    info "Waiting for every service to be healthy (≤ ${UPDATE_VERIFY_TIMEOUT} s, then ${UPDATE_SETTLE} s stable)…"
+    wait_ok "$UPDATE_VERIFY_TIMEOUT" "${CHECK_SVC[@]}" || auto_rollback "not healthy after the update: ${BAD//$'\n'/ }"
+  fi
+  record "images ok: ${SUMMARY[*]}"
+  compose ps
+}
 
-  # ── 6. host tools: each has its own rollback; a failure there never undoes the images ──
+# ── 3. Hermes (host release) ──
+# agent_verify — healthy within UPDATE_VERIFY_TIMEOUT, and still UPDATE_SETTLE s later.
+agent_verify() { agent_wait_healthy "$UPDATE_VERIFY_TIMEOUT" && sleep "$UPDATE_SETTLE" && agent_healthy; }
+
+update_agent() {
+  local mode="$1" sha short cur out busy
+  [ -e "$HERMES_CURRENT/.release" ] || { warn "Hermes is not installed on the host — skipped (sudo command-center deploy hermes)"; return 0; }
+  cur="$("$HERMES_HOST_SH" current)"
+  if ! sha="$("$HERMES_HOST_SH" resolve)"; then
+    record "Hermes: cannot resolve ${HERMES_REF:-main} — skipped"; warn "Hermes: cannot resolve ${HERMES_REF:-main}"; return 0
+  fi
+  short="${sha:0:12}"
+  if [ "$short" = "$cur" ]; then info "Hermes: $cur is current"; record "Hermes $cur current"; return 0; fi
+  if is_failed "$AGENT_KEY" "$sha"; then
+    warn "Hermes $short already failed here — skipped until a newer commit (retry: sudo $0 --force)"
+    record "Hermes $short skipped (known-bad)"; return 0
+  fi
+  if [ "$mode" != check ] && ! agent_healthy; then
+    record "Hermes skipped: not healthy before the update (heal.sh handles it)"
+    warn "Hermes is not healthy — not updating a sick agent"; return 0
+  fi
+  info "Hermes: building $short next to $cur (nothing restarts)…"
+  if ! out="$("$HERMES_HOST_SH" build "$sha" 2>&1)"; then
+    printf '%s\n' "$out" | tail -n 40 >&2
+    record "Hermes FAILED: build of $short — $cur keeps running"; NOTIFIED=1
+    notify "update.sh: the Hermes $short build failed — nothing was changed, $cur keeps running. journalctl -u hermes-update"
+    return 0
+  fi
+  if [ "$mode" = check ]; then
+    info "check: Hermes would switch $cur → $short"
+    busy="$(hermes_busy)"
+    if [ -z "$busy" ]; then info "check: Hermes is idle"
+    else info "check: Hermes is working — the switch would wait (≤ $((UPDATE_BUSY_WAIT / 60)) min):"; printf '%s\n' "$busy" | sed 's/^/  /'; fi
+    return 0
+  fi
+  gate_agent_idle || return 0
+  info "Hermes: switching $cur → $short…"
+  if "$HERMES_HOST_SH" activate "$short" && agent_verify; then
+    rm -f "$UPDATE_HOLD"
+    record "Hermes ok: $cur → $short"
+    info "Hermes $short OK"
+  else
+    warn "Hermes $short not healthy → back to $cur"
+    journalctl -u hermes-gateway -u hermes-dashboard -n 40 --no-pager -o cat >&2 || true
+    mark_failed "$AGENT_KEY" "$sha"
+    if "$HERMES_HOST_SH" rollback && agent_verify; then
+      record "Hermes ROLLED BACK: $short not healthy — back on $cur"
+      notify "update.sh: Hermes $short did not come up healthy — rolled back to $cur. That commit is skipped until a newer one. journalctl -u hermes-gateway"
+    else
+      record "Hermes ROLLBACK FAILED: $short not healthy, $cur not healthy either"
+      notify "update.sh: Hermes $short did not come up, and the rollback to $cur is not healthy either. Check the VPS: sudo command-center hermes status"
+    fi
+    NOTIFIED=1
+  fi
+  hermes_unpause
+}
+
+do_update() {
+  local mode="${1:-}" free_gb
+  [ "$mode" = --force ] && FORCE=1
+  if [ -e "$UPDATE_HOLD" ] && [ "$mode" = "" ]; then
+    warn "updates on hold since $(cat "$UPDATE_HOLD"). Lift with: sudo $0 resume — or: sudo $0 --force"
+    exit 0
+  fi
+  # heal.sh holds this lock for up to ~3 min while it restarts Hermes; wait, do not skip silently.
+  lock_update -w 600 || die "heal.sh (or another update.sh) has held $UPDATE_LOCK for 10 min — try again"
+  trap on_exit EXIT
+
+  # ── 1. preflight ──
+  free_gb="$(df --output=avail -BG "$(docker info -f '{{.DockerRootDir}}')" | tail -n1 | tr -dc 0-9)"
+  if [ "${free_gb:-0}" -lt "$UPDATE_MIN_FREE_GB" ]; then
+    record "skipped: only ${free_gb} GB free (< $UPDATE_MIN_FREE_GB)"
+    die "only ${free_gb} GB free — not updating (UPDATE_MIN_FREE_GB=$UPDATE_MIN_FREE_GB)"
+  fi
+
+  update_images "$mode"
+  update_agent "$mode"
+  [ "$mode" != check ] || return 0
+  docker image prune -f >/dev/null
+
+  # ── 4. host tools: each has its own rollback; a failure there never undoes the rest ──
   if [ -e /opt/orca/current ]; then
     "$STACK_DIR/orca.sh" update || { warn "Orca update failed (stack update is fine): sudo $STACK_DIR/orca.sh update"; notify "update.sh: orca.sh update failed — journalctl -u hermes-update"; }
   fi
@@ -421,7 +422,7 @@ do_update() {
 
 case "${1:-}" in
   rollback) lock_stack -w 600 || die "backup.sh or another update.sh is running"; lock_update || die "update.sh is running"; do_rollback ;;
-  resume)   rm -f "$UPDATE_HOLD" "$UPDATE_FAILED"; info "hold lifted and failed versions forgotten — the next update.sh run tries the latest images again" ;;
+  resume)   rm -f "$UPDATE_HOLD" "$UPDATE_FAILED"; info "hold lifted and failed versions forgotten — the next update.sh run tries the latest versions again" ;;
   ""|--force|check) lock_stack || die "could not take $STACK_LOCK (backup.sh running for 3 h?)"; do_update "${1:-}" ;;
   busy)     b="$(hermes_busy)"; [ -n "$b" ] || { info "Hermes is idle"; exit 0; }; info "Hermes is working:"; printf '%s\n' "$b" | sed 's/^/  /'; exit 1 ;;
   *) die "usage: $0 [check|busy|rollback|resume|--force]" ;;

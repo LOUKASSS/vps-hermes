@@ -4,16 +4,23 @@
 #
 # /srv layout (one folder per project, one shared workspace):
 #   /srv/command-center   this repo: scripts, compose, .env, state/traefik (STACK_DIR)
-#   /srv/hermes           Hermes agent: data/ (/opt/data), obsidian/, postgres/
+#   /srv/hermes           Hermes agent: data/ (/opt/data → it), obsidian/, postgres/
+#   /opt/hermes           Hermes code: → /opt/hermes-releases/<sha12> (hermes-host.sh, systemd units)
 #   /srv/orca             Orca HOME (orca.service)
 #   /srv/helios           Helios deployment: .env, tinyauth/ (code: WORKSPACE/projects/helios)
 #   /srv/discord-backup   Discord backup bot: app/ releases, bws.env, var/ archives (discord-backup.sh)
-#   /srv/workspace        shared projects — same absolute path on the host and in hermes-agent
+#   /srv/workspace        shared projects — every tool (Hermes, Orca, herdr, SSH) on the host
 
 # Physical path (-P): scripts reached through a compat symlink must still resolve to the real
 # checkout, or compose would derive another project name / relative paths from the link.
 STACK_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SRV_ROOT="${SRV_ROOT:-/srv}"
+# Hermes on the host (hermes-host.sh): code releases, the active one, its environment.
+# shellcheck disable=SC2034  # used by hermes-host.sh / update.sh
+HERMES_RELEASES=/opt/hermes-releases
+HERMES_CURRENT=/opt/hermes
+AGENT_ENV=/etc/hermes/agent.env
+: "${OP_USER:=hermes}"
 
 if [ -t 1 ]; then
   _c_info=$'\033[1;34m'; _c_warn=$'\033[1;33m'; _c_err=$'\033[1;31m'; _c_off=$'\033[0m'
@@ -140,16 +147,15 @@ UPDATE_HOLD="$STACK_DIR/.update-hold"
 # notify <text> — optional push for unattended runs, to either or both of:
 #   UPDATE_NOTIFY_HERMES  a `hermes send` target (telegram = its home channel, telegram:<chat_id>,
 #                         discord:#ops…): the Hermes agent delivers it with the gateway's bot
-#                         credentials — no LLM call; skipped while hermes-agent is not running
+#                         credentials — no LLM call; skipped while no Hermes release is installed
 #   UPDATE_NOTIFY_URL     a Discord webhook gets {"content": …}, any other URL (ntfy.sh/<topic>, …)
 #                         the plain text as the POST body.
 # Never fails the caller.
 notify() {
   local url="${UPDATE_NOTIFY_URL:-}" target="${UPDATE_NOTIFY_HERMES:-}" msg
   msg="[$(hostname)] $*"
-  if [ -n "$target" ] && [ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" = true ]; then
-    timeout 60 docker exec -u "${HERMES_UID:-1000}:${HERMES_GID:-1000}" -e HOME=/opt/data/home hermes-agent \
-      hermes send -q --to "$target" "$msg" >/dev/null 2>&1 || warn "notify: hermes send --to $target failed"
+  if [ -n "$target" ] && [ -e "$HERMES_CURRENT/.release" ] && [ -r "$AGENT_ENV" ]; then
+    agent_run timeout 60 hermes send -q --to "$target" "$msg" >/dev/null 2>&1 || warn "notify: hermes send --to $target failed"
   fi
   [ -n "$url" ] || return 0
   case "$url" in
@@ -180,24 +186,63 @@ enable_profile() {
   export COMPOSE_PROFILES="$cur"
 }
 
-# Interactive command inside the agent container, as the runtime user, with HOME set
-# to the tool-subprocess home so CLI credentials land where the agent's own tool calls
-# will find them (/opt/data/home/.claude, .codex, .grok, .config/gh).
-# cwd = the workspace, mounted at the same absolute path as on the host (plus /workspace alias).
-agent_exec() {
-  compose exec -it -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent "$@"
+# Hermes as its runtime user, the way the gateway runs it: /etc/hermes/agent.env (hermes-host.sh
+# units) with HOME=/opt/data/home, the tool-subprocess home, so CLI credentials land where the
+# agent's own tool calls find them (/opt/data/home/.claude, .codex, .grok, .config/gh).
+# cwd = the shared workspace. Root runs it through runuser; the operator user directly.
+_agent_env() {
+  local line
+  [ -r "$AGENT_ENV" ] || die "$AGENT_ENV missing or unreadable — sudo command-center hermes units"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ""|"#"*) continue ;; esac
+    printf '%s\0' "$line"
+  done < "$AGENT_ENV"
+  printf '%s\0' HOME=/opt/data/home "TERM=${TERM:-xterm}" ${COLORTERM:+"COLORTERM=$COLORTERM"}
+}
+_agent_cmd() {
+  local -a envs=(); local runas=()
+  mapfile -d '' envs < <(_agent_env)
+  [ "${EUID:-$(id -u)}" -ne 0 ] || runas=(runuser -u "$OP_USER" --)
+  "${runas[@]}" env -i -C "${AGENT_CWD:-$HERMES_WORKSPACE_DIR}" "${envs[@]}" "$@"
+}
+agent_exec() { _agent_cmd "$@"; }
+agent_run() { _agent_cmd "$@"; }
+
+# agent_wrapper_init — for bin/hermes and bin/omh, run by the operator without the stack .env
+# (root-only): the workspace comes from agent.env; AGENT_CWD = the current directory when it is
+# inside the workspace, else the workspace root.
+agent_wrapper_init() {
+  local here
+  [ "${EUID:-$(id -u)}" -eq 0 ] || [ "$(id -un)" = "$OP_USER" ] || die "run as root or $OP_USER"
+  [ -r "$AGENT_ENV" ] || die "$AGENT_ENV unreadable — Hermes is not installed on the host (sudo command-center hermes status)"
+  HERMES_WORKSPACE_DIR="$(sed -n 's/^WORKSPACE_DIR=//p' "$AGENT_ENV" | head -n1)"
+  : "${HERMES_WORKSPACE_DIR:=$SRV_ROOT/workspace}"
+  here="$(pwd -P 2>/dev/null || true)"
+  AGENT_CWD="$HERMES_WORKSPACE_DIR"
+  case "$here/" in "$HERMES_WORKSPACE_DIR"/*) AGENT_CWD="$here" ;; esac
 }
 
-# Same, non-interactive (for scripts).
-agent_run() {
-  compose exec -T -u "${HERMES_UID}:${HERMES_GID}" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent "$@"
+# agent_running — both services are active (systemd). agent_healthy — they also answer:
+# the gateway on /health, the dashboard on /api/status (what the container healthcheck probed).
+agent_running() { systemctl is-active -q hermes-gateway.service && systemctl is-active -q hermes-dashboard.service; }
+agent_healthy() {
+  agent_running \
+    && curl -fsS -m 5 -o /dev/null http://127.0.0.1:8642/health \
+    && curl -fsS -m 5 -o /dev/null "http://${DESKTOP_BIND:-127.0.0.1}:${DESKTOP_PORT:-9120}/api/status"
+}
+# agent_wait_healthy <seconds>
+agent_wait_healthy() {
+  local deadline=$((SECONDS + ${1:-180}))
+  until agent_healthy; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 5
+  done
 }
 
-# ensure_workspace — the shared project tree every tool works in (host: SSH / herdr / Orca;
-# container: hermes-agent, same absolute path). Owned by HERMES_UID (= the operator user `hermes`
-# and the agent's runtime uid), so both sides read and write it without ACLs. /workspace on the
-# host is a symlink to it: paths written by the agent through its historical /workspace mount
-# (git worktrees, kanban, handoffs) resolve on the host as well.
+# ensure_workspace — the shared project tree every tool works in (Hermes, SSH, herdr, Orca — all
+# on the host). Owned by HERMES_UID (= the operator user `hermes`, which Hermes runs as), so every
+# tool reads and writes it without ACLs. /workspace is a symlink to it: paths the agent wrote
+# through its historical /workspace mount (git worktrees, kanban, handoffs) still resolve.
 ensure_workspace() {
   local w="$HERMES_WORKSPACE_DIR" d
   no_symlink "$w"
@@ -294,24 +339,22 @@ restic_run() {
     "$RESTIC_IMAGE" "$@"
 }
 
-# Recreate hermes-agent (new /opt/data/.env, new image…). Holds UPDATE_LOCK so heal.sh (every
-# minute) does not "repair" it mid-recreate. The lock stays with the calling script until it
-# exits (fd 8) — fine, these are short-lived commands.
-# From a terminal, asks first when Hermes is working (the recreate cuts it); heal.sh (no terminal,
-# container already sick) does not wait. The Hermes CLIs of herdr are resumed afterwards.
+# Restart Hermes (new /opt/data/.env, new release…). Holds UPDATE_LOCK so heal.sh (every minute)
+# does not "repair" it mid-restart. The lock stays with the calling script until it exits (fd 8).
+# From a terminal, asks first when Hermes is working (the restart cuts gateway turns, cron jobs,
+# kanban runs); heal.sh (no terminal, service already sick) does not wait. Hermes CLIs started
+# with bin/hermes are separate processes: a restart does not touch them.
 restart_agent() {
   [ "${UPDATE_LOCKED:-}" = 1 ] || lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
   local busy a
   if [ -t 0 ] && busy="$(hermes_busy)" && [ -n "$busy" ]; then
-    warn "Hermes is working — recreating hermes-agent cuts it:"
+    warn "Hermes is working — restarting it cuts:"
     printf '%s\n' "$busy" | sed 's/^/  /' >&2
-    read -r -p "Recreate hermes-agent anyway? [y/N] " a
-    case "$a" in [yY]*) ;; *) die "cancelled — hermes-agent left running" ;; esac
+    read -r -p "Restart Hermes anyway? [y/N] " a
+    case "$a" in [yY]*) ;; *) die "cancelled — Hermes left running" ;; esac
   fi
-  hermes_panes_snapshot
-  compose up -d --force-recreate hermes-agent
-  wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min: docker compose logs hermes-agent"
-  hermes_sessions_restore
+  systemctl restart hermes-gateway.service hermes-dashboard.service
+  agent_wait_healthy 180 || warn "Hermes not healthy after 3 min: journalctl -u hermes-gateway -u hermes-dashboard"
 }
 
 # wait_healthy <container> <seconds>
@@ -325,6 +368,6 @@ wait_healthy() {
   return 1
 }
 
-# Hermes work / herdr sessions around a recreate of hermes-agent (update.sh, restart_agent).
+# Hermes work around a restart (update.sh busy gate, restart_agent).
 # shellcheck source=lib/agent-sessions.sh
 . "$STACK_DIR/lib/agent-sessions.sh"

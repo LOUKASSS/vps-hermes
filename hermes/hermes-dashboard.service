@@ -1,0 +1,28 @@
+# Hermes dashboard (web UI + Hermes Desktop backend + embedded chat) on the host. Written by
+# hermes-host.sh units (edit .env, not this). Bound to DESKTOP_BIND (the Tailscale IP): tailnet
+# clients reach it raw, Traefik through its file route (proxy bridge → ufw rule). A non-loopback
+# bind engages the dashboard's auth gate: HERMES_DASHBOARD_BASIC_AUTH_* in the EnvironmentFile.
+[Unit]
+Description=Hermes dashboard (web UI, Hermes Desktop backend)
+After=network-online.target tailscaled.service hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+Group=@USER@
+EnvironmentFile=@ENV@
+WorkingDirectory=/opt/data
+# The bind address must exist first (tailscaled can be slower than us at boot).
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip -4 -o addr show | grep -q " inet @BIND@/" && exit 0; sleep 2; done; echo "hermes-dashboard: @BIND@ not up after 60 s" >&2; exit 1'
+ExecStart=@CURRENT@/.venv/bin/hermes dashboard --host @BIND@ --port @PORT@ --no-open
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+MemoryMax=4G
+TasksMax=1024
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
