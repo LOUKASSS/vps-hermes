@@ -244,6 +244,8 @@ HERMES_DISABLE_LAZY_INSTALLS=1
 HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
 DISABLE_AUTOUPDATER=1
 CODEX_DISABLE_UPDATE_CHECK=1
+# Bound to one IP, the dashboard only accepts that Host or its public URL (Traefik sends HERMES_HOST).
+HERMES_DASHBOARD_PUBLIC_URL=https://$HERMES_HOST
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DESKTOP_USERNAME:-admin}
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DESKTOP_PASSWORD:?set by install.sh}
 HERMES_DASHBOARD_BASIC_AUTH_SECRET=${DESKTOP_SECRET:?set by install.sh}
@@ -267,6 +269,7 @@ EOF
 
 write_provenance() {
   local sha="$1" version
+  install -d -m 755 /etc/hermes
   version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$HERMES_RELEASES/${sha:0:12}/pyproject.toml" | head -n1)"
   printf '{"deployment_kind":"image","image":"host:%s","manager":"command-center","revision":"%s","schema":1,"version":"%s"}\n' \
     "$HERMES_RELEASES" "$sha" "${version:-unknown}" > "$PROVENANCE.tmp"
@@ -288,8 +291,23 @@ write_units() {
   sed -e "s|@USER@|$OP_USER|g" -e "s|@CURRENT@|$HERMES_CURRENT|g" -e "s|@ENV@|$AGENT_ENV|g" \
     -e "s|@BIND@|${DESKTOP_BIND:-127.0.0.1}|g" -e "s|@PORT@|$DESKTOP_PORT|g" \
     "$STACK_DIR/hermes/hermes-dashboard.service" > "$DASHBOARD_UNIT"
+  alias_gateway_unit
   systemctl daemon-reload
   systemctl enable hermes-gateway.service hermes-dashboard.service >/dev/null 2>&1
+}
+
+# Hermes names the unit of a HERMES_HOME outside ~/.hermes `hermes-gateway-<hash>`; only root sees
+# the bare hermes-gateway.service as ours. Without this alias the agent (not root) would think its
+# gateway runs "manually", and `hermes gateway restart` would not go through systemd.
+alias_gateway_unit() {
+  local name
+  name="$(agent_run python3 -c 'from hermes_cli.gateway import get_service_name; print(get_service_name())' 2>/dev/null | tail -n1)"
+  case "$name" in
+    hermes-gateway) ;;
+    hermes-gateway-*) [[ "$name" =~ ^hermes-gateway-[a-z0-9_-]+$ ]] || die "unexpected gateway unit name: $name"
+                      ln -sfn hermes-gateway.service "/etc/systemd/system/$name.service" ;;
+    *) warn "cannot read the gateway unit name Hermes expects (got: ${name:-nothing}) — no alias" ;;
+  esac
 }
 
 # Traefik (container) → dashboard (host). File provider: the docker provider only sees containers.
@@ -393,7 +411,7 @@ services_restart() {
 
 do_rollback() {
   local prev
-  prev="$(basename "$(readlink -f "$HERMES_RELEASES/previous" 2>/dev/null || echo)")"
+  prev=""; [ ! -e "$HERMES_RELEASES/previous" ] || prev="$(basename "$(readlink -f "$HERMES_RELEASES/previous")")"
   [ -n "$prev" ] && [ -n "$(release_sha "$prev")" ] || die "no previous release kept"
   activate "$prev"
   do_units
@@ -402,7 +420,8 @@ do_rollback() {
 
 do_status() {
   local cur prev
-  cur="$(current_release)"; prev="$(basename "$(readlink -f "$HERMES_RELEASES/previous" 2>/dev/null || echo)")"
+  cur="$(current_release)"; prev=""
+  [ ! -e "$HERMES_RELEASES/previous" ] || prev="$(basename "$(readlink -f "$HERMES_RELEASES/previous")")"
   printf '  %-10s %s\n' release "${cur:-none}  $(release_sha "$cur")" previous "${prev:-none}"
   printf '  %-10s %s\n' gateway "$(systemctl is-active hermes-gateway 2>/dev/null || true)" dashboard "$(systemctl is-active hermes-dashboard 2>/dev/null || true)"
   if agent_healthy; then printf '  %-10s %s\n' health "ok (gateway /health + dashboard /api/status)"
