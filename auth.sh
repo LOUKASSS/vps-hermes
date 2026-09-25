@@ -14,7 +14,7 @@ load_env
 
 # Everything but obsidian/status runs as the agent: needs an installed release and its env.
 case "${1:-}" in 8|obsidian|9|status) ;; *)
-  [ -e "$HERMES_CURRENT/.release" ] && [ -r "$AGENT_ENV" ] \
+  hermes_installed && [ -r "$AGENT_ENV" ] \
     || die "Hermes is not installed on the host (sudo command-center hermes status)" ;;
 esac
 

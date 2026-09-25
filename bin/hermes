@@ -16,7 +16,7 @@ set -euo pipefail
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
 agent_wrapper_init
-[ -e "$HERMES_CURRENT/.release" ] || die "no active Hermes release in $HERMES_CURRENT (sudo command-center hermes status)"
+hermes_installed || die "no active Hermes release in $HERMES_CURRENT (sudo command-center hermes status)"
 
 # No `exec`: this script — a process named `hermes` — stays in the terminal's foreground, which is
 # how herdr recognises the agent and tracks idle / working / blocked. Its exit status is the CLI's.
