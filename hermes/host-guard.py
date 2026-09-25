@@ -21,7 +21,8 @@ fail_closed: a crash or a timeout blocks the call. stdin: the hook payload (JSON
 command, so "always" allows that command only, never "all sudo".
 
 This is a seatbelt against mistakes and prompt injection, not a security boundary: an agent that
-means to get around it can (it holds the uid that owns /opt/data).
+means to get around it can (it holds the uid that owns /opt/data). Regexes, not a shell parser: when
+unsure it errs towards asking (quoted text that looks like `do sudo …` asks too).
 
   host-guard.py --self-test     # run the built-in cases
 """
@@ -44,7 +45,9 @@ AGENT_CONTROL = (
     "/srv/hermes/data/config.yaml", "/srv/hermes/data/.env", "/srv/hermes/data/auth.json",
     "/srv/hermes/data/shell-hooks-allowlist.json",
 )
-CMD = r"(?:^|[;&|`(\n]|\$\(|&&|\|\||['\"])\s*(?:\w+=\S*\s+)*"          # command position
+# Command position: start, after a separator / quote, or after a shell keyword (if…then, for…do…).
+CMD = (r"(?:^|[;&|`(\n{]|\$\(|&&|\|\||['\"]|\b(?:then|do|else|elif|while|until|time|exec|nohup|xargs|env)\s)"
+       r"\s*(?:\w+=\S*\s+)*")
 RULES = [
     ("sudo", CMD + r"sudo\b"),
     ("su", CMD + r"su(?:\s|$)"),
@@ -148,6 +151,12 @@ SELF_TEST = [
     ("terminal", {"command": "psql -c 'select 1'"}, False),
     ("terminal", {"command": "ufw status"}, True),
     ("terminal", {"command": "bash -c 'sudo reboot'"}, True),
+    ("terminal", {"command": "if true; then sudo reboot; fi"}, True),
+    ("terminal", {"command": "for i in 1; do sudo systemctl restart hermes-gateway; done"}, True),
+    ("terminal", {"command": "while true; do docker restart traefik; done"}, True),
+    ("terminal", {"command": "{ sudo true; }"}, True),
+    ("terminal", {"command": "echo done; echo then"}, False),
+    ("terminal", {"command": "grep -rn sudo /srv/workspace/projects"}, False),
     ("execute_code", {"code": "import os; os.system('sudo reboot')"}, True),
     ("execute_code", {"code": "print(open('/srv/workspace/scratch/a').read())"}, False),
     ("write_file", {"path": "/srv/workspace/scratch/a.md", "content": "x"}, False),

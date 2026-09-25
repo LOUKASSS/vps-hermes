@@ -201,6 +201,8 @@ _agent_env() {
 }
 _agent_cmd() {
   local -a envs=(); local runas=()
+  # Checked here: a die inside the process substitution below would only end that subshell.
+  [ -r "$AGENT_ENV" ] || die "$AGENT_ENV missing or unreadable — sudo command-center hermes units"
   mapfile -d '' envs < <(_agent_env)
   [ "${EUID:-$(id -u)}" -ne 0 ] || runas=(runuser -u "$OP_USER" --)
   "${runas[@]}" env -i -C "${AGENT_CWD:-$HERMES_WORKSPACE_DIR}" "${envs[@]}" "$@"

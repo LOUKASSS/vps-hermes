@@ -248,6 +248,7 @@ gate_agent_idle() {
       fi
       lock_update -w 600 || die "heal.sh held $UPDATE_LOCK for 10 min after the wait — try again"
       if ! agent_healthy; then
+        flock -u 8; UPDATE_LOCKED=0   # heal.sh must get the lock to repair it
         record "Hermes skipped: not healthy after waiting for it to be idle (heal.sh handles it)"
         warn "Hermes is not healthy any more — not switching a sick agent"
         return 1
@@ -348,6 +349,7 @@ update_agent() {
     record "Hermes $short skipped (known-bad)"; return 0
   fi
   if [ "$mode" != check ] && ! agent_healthy; then
+    flock -u 8; UPDATE_LOCKED=0   # heal.sh must get the lock to repair it
     record "Hermes skipped: not healthy before the update (heal.sh handles it)"
     warn "Hermes is not healthy — not updating a sick agent"; return 0
   fi
