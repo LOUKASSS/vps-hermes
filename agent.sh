@@ -55,8 +55,7 @@ for a in "$@"; do
   esac
 done
 
-agent_running() { [ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)" = true ]; }
-need_agent() { agent_running || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d"; }
+need_agent() { agent_running || die "Hermes is not running: sudo command-center hermes status (start: sudo command-center hermes start)"; }
 hx() { agent_run hermes "$@"; }
 hx_quiet() { agent_run hermes "$@" >/dev/null 2>&1; }
 
@@ -179,7 +178,7 @@ do_sync_files() {
   else
     warn "  repo mcp/ missing — skip mcp-src rsync"
   fi
-  # Repo is not mounted in the container; profiles.sh did the same via distributions/<name>/setup.sh.
+  # The agent runs setup.sh from its data dir (never from the repo checkout, which it can write).
   install -m 755 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/setup.sh" "$HERMES_DATA_DIR/mcp-src/setup.sh"
   info "  mcp-src/setup.sh"
 
@@ -191,7 +190,7 @@ do_sync_files() {
   sync_config
 }
 
-# ── sync (sync-files + container steps) ────────────────────────────────
+# ── sync (sync-files + steps run as the agent) ─────────────────────────
 
 # Repo lock entries win; entries for skills only installed live survive.
 merge_hub_lock() {
@@ -223,7 +222,7 @@ PY
 }
 
 seed_essentials() {
-  agent_run env PYTHONPATH=/opt/hermes HERMES_HOME=/opt/data python3 -c \
+  agent_run env PYTHONPATH="$HERMES_CURRENT" HERMES_HOME=/opt/data python3 -c \
     'from tools.skills_sync import sync_skills; r = sync_skills(quiet=True); r = r or {}; n = lambda v: v if isinstance(v, int) else len(v or []); print("  essentials: %d copied, %d updated, %d up to date" % (n(r.get("copied")), n(r.get("updated")), n(r.get("skipped"))))' \
     2>/dev/null || warn "essential-skill seeding failed (hermes update will do it)"
 }
@@ -253,15 +252,8 @@ install_plugins() {
 }
 
 run_setup() {
-  info "  setup.sh (MCP build)"
-  if agent_run env PROFILE_DIR=/opt/data DIST_DIR=/opt/data/mcp-src bash /opt/data/mcp-src/setup.sh; then
-    return 0
-  fi
-  warn "compose exec failed, falling back to compose run --entrypoint bash"
-  compose run --rm --no-deps --entrypoint bash \
-    -u "$HERMES_UID:$HERMES_GID" -e HOME=/opt/data/home -w "$HERMES_WORKSPACE_DIR" hermes-agent \
-    -lc 'PROFILE_DIR=/opt/data DIST_DIR=/opt/data/mcp-src bash /opt/data/mcp-src/setup.sh' \
-    || die "setup.sh failed"
+  info "  setup.sh (MCP build, Node $(agent_run node --version 2>/dev/null || echo ?))"
+  agent_run env PROFILE_DIR=/opt/data DIST_DIR=/opt/data/mcp-src bash /opt/data/mcp-src/setup.sh || die "setup.sh failed"
 }
 
 do_sync() {
@@ -274,8 +266,8 @@ do_sync() {
   seed_essentials
   assert_no_cli_skills
   info "Restarting the gateway so it picks up skills/plugins/MCP…"
-  hx gateway restart >/dev/null || warn "gateway restart failed — docker compose logs hermes-agent"
-  wait_healthy hermes-agent 180 || warn "hermes-agent not healthy after 3 min"
+  systemctl restart hermes-gateway.service || warn "gateway restart failed — journalctl -u hermes-gateway"
+  agent_wait_healthy 180 || warn "Hermes not healthy after 3 min: journalctl -u hermes-gateway"
   do_status
 }
 

@@ -2,16 +2,17 @@
 # Command center — one entry point to deploy and administer every service of the VPS.
 #
 #   /srv/command-center   this repo (scripts, compose, .env)       ← you are here
-#   /srv/hermes           Hermes agent data (data/, obsidian/, postgres/)
+#   /srv/hermes           Hermes agent data (data/ = /opt/data, obsidian/, postgres/)
+#   /opt/hermes           Hermes code (active release; hermes-host.sh, systemd hermes-gateway / hermes-dashboard)
 #   /srv/orca             Orca HOME (orca.service, on the host)
 #   /srv/helios           Helios deployment (.env, tinyauth state); code in the workspace
 #   /srv/discord-backup   Discord backup bot (releases, bws.env, sealed archives)
-#   /srv/workspace        shared projects — same path for the agent, Orca, herdr and SSH
+#   /srv/workspace        shared projects — Hermes, Orca, herdr and SSH, all on the host
 #
 #   sudo command-center                       # interactive menu
 #   sudo command-center status                # everything at a glance
 #   sudo command-center deploy <all|hermes|orca|helios|herdr|discord-backup>   # one-click (idempotent) deploys
-#   sudo command-center hermes <auth|agent|update|rollback|backup|logs|shell|chat|restart|ps> [args…]
+#   sudo command-center hermes <auth|agent|sync|update|rollback|backup|logs|shell|chat|start|stop|restart|status|build|activate|releases|units|ps> [args…]
 #   sudo command-center orca   <install|update|pair|creds|login|status|logs|…>   (orca.sh)
 #   sudo command-center helios <deploy|status|ps|logs|down|restart>              (helios.sh)
 #   sudo command-center herdr  <install|update|creds|login|status|logs|restart>  (herdr.sh)
@@ -46,7 +47,9 @@ do_status() {
   [ "${#compat[@]}" -eq 0 ] || line "compat" "${compat[*]} → still linked (pending: sudo command-center migrate finalize)"
   [ -L /workspace ] && line "/workspace" "→ $(readlink /workspace)"
 
-  echo; echo "── hermes (platform + agent, compose project command-center) ──"
+  echo; echo "── hermes (host: hermes-gateway + hermes-dashboard) ──"
+  "$STACK_DIR/hermes-host.sh" status 2>/dev/null || echo "  (hermes-host.sh status failed)"
+  echo; echo "── platform (compose project command-center) ──"
   compose ps --format '  {{.Name}}\t{{.Status}}' 2>/dev/null || echo "  compose unavailable"
   [ -e "$MAINTENANCE_FLAG" ] && echo "  .maintenance present: heal.sh paused"
   [ -e "$UPDATE_HOLD" ] && echo "  .update-hold present: nightly update paused (sudo command-center update resume)"
@@ -79,13 +82,13 @@ do_status() {
 # ── workspace ───────────────────────────────────────────────────────────
 workspace_status() {
   local w="$HERMES_WORKSPACE_DIR" r
-  echo "$w  owner $(stat -c '%U:%G' "$w" 2>/dev/null || echo '?')  (agent sees the same path; /workspace = alias)"
+  echo "$w  owner $(stat -c '%U:%G' "$w" 2>/dev/null || echo '?')  (/workspace = alias)"
   for r in HERMES.md AGENTS.md CLAUDE.md; do [ -e "$w/$r" ] && printf '%s ' "$r"; done; echo "(context files)"
   echo "repos: $(find "$w/projects" -mindepth 2 -maxdepth 2 -name .git -printf '%h\n' 2>/dev/null | sed 's|.*/||' | sort | tr '\n' ' ')"
   local foreign; foreign="$(find "$w" -xdev -maxdepth 3 \! -user "$HERMES_UID" -printf '%p (%u)\n' 2>/dev/null | head -n 5)"
   [ -z "$foreign" ] || { echo "not owned by uid $HERMES_UID (fix: command-center workspace fix):"; echo "$foreign" | sed 's/^/  /'; }
-  if docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null | grep -q true; then
-    agent_run sh -c 'test -w "$WORKSPACE_DIR" && echo "agent container: $WORKSPACE_DIR writable as $(id -un)" || echo "agent container: $WORKSPACE_DIR NOT writable"' 2>/dev/null || true
+  if [ -r "$AGENT_ENV" ]; then
+    agent_run sh -c 'test -w "$WORKSPACE_DIR" && echo "Hermes: $WORKSPACE_DIR writable as $(id -un)" || echo "Hermes: $WORKSPACE_DIR NOT writable"' 2>/dev/null || true
   fi
 }
 
@@ -111,7 +114,7 @@ do_hermes() {
     auth)     run auth.sh "$@" ;;
     shell)    run auth.sh shell ;;
     chat)     run auth.sh chat "$@" ;;
-    status)   sub auth.sh status; sub agent.sh status ;;
+    status)   sub hermes-host.sh status; sub auth.sh status; sub agent.sh status ;;
     agent)    run agent.sh "$@" ;;
     sync)     CUTOVER=1 run agent.sh sync "$@" ;;
     update)   run update.sh "$@" ;;
@@ -119,9 +122,11 @@ do_hermes() {
     backup)   run backup.sh "$@" ;;
     heal)     run heal.sh ;;
     restart)  need_root; load_env; restart_agent ;;
+    start|stop|build|activate|releases|units|probe) run hermes-host.sh "$c" "$@" ;;
     ps)       compose ps ;;
-    logs)     compose logs -f --tail=100 "${@:-hermes-agent}" ;;
-    *) die "usage: command-center hermes <deploy|auth|shell|chat|status|agent|sync|update|rollback|backup|heal|restart|ps|logs>" ;;
+    # No argument: the agent's journal; a container name: its compose logs.
+    logs)     if [ $# -eq 0 ]; then exec journalctl -f -n 100 -u hermes-gateway -u hermes-dashboard; else compose logs -f --tail=100 "$@"; fi ;;
+    *) die "usage: command-center hermes <deploy|auth|shell|chat|status|agent|sync|update|rollback|backup|heal|start|stop|restart|build|activate|releases|units|probe|ps|logs>" ;;
   esac
 }
 
@@ -158,13 +163,13 @@ menu() {
    5) deploy helios     build + restart Helios from /srv/workspace/projects/helios
    6) deploy herdr      herdr + terminal-code plugin + herdr.service
    7) hermes auth       logins (Hermes model, claude/codex/grok, gh, messaging, obsidian)
-   8) hermes shell      shell in the agent container
+   8) hermes shell      shell as the agent (its env, HOME=/opt/data/home)
    9) hermes sync       re-sync SOUL / skills / MCP / workspace context from hermes-config
   10) orca pair         pairing link for the desktop or mobile app
   11) herdr creds       copy the agent's CLI logins for herdr / SSH sessions
   12) workspace fix     ownership + /workspace link + context files
   13) backup run        restic backup to B2 now
-  14) update            update now (images, CLIs, Orca, herdr; tested, auto-rollback)
+  14) update            update now (images, Hermes release, CLIs, Orca, herdr; tested, auto-rollback)
   15) discord-backup    status of the Discord backup bot (archives, verification)
    q) quit
 MENU
@@ -195,6 +200,6 @@ case "$cmd" in
   update)    run update.sh "$@" ;;
   harden)    run harden.sh "$@" ;;
   auth)      run auth.sh "$@" ;;
-  -h|--help|help) sed -n '2,23p' "$(readlink -f "$0")" ;;
+  -h|--help|help) sed -n '2,24p' "$(readlink -f "$0")" ;;
   *) die "unknown command: $cmd (command-center help)" ;;
 esac

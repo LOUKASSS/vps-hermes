@@ -1,13 +1,15 @@
-# Command center — platform (Traefik, socket proxy, tailnet DNS) + the Hermes agent project
-# (hermes-agent, PostgreSQL, Obsidian Sync) on one VPS. Helios has its own compose project
-# (helios.sh, code in the workspace) and joins the `proxy` network created here.
+# Command center — platform (Traefik, socket proxy, tailnet DNS) + the Hermes agent's services
+# (PostgreSQL, Obsidian Sync) on one VPS. Hermes itself runs ON THE HOST (hermes-host.sh: systemd
+# hermes-gateway + hermes-dashboard, code in /opt/hermes); the hermes-agent service below is only
+# kept for a rollback (profile agent-docker). Helios has its own compose project (helios.sh, code
+# in the workspace) and joins the `proxy` network created here.
 #
 #   command-center → menu / one-click deploys for every service (hermes, orca, helios, herdr)
 #   install.sh  → first boot on a fresh VPS
 #   auth.sh     → OAuth logins (Claude Max / ChatGPT-Codex / SuperGrok / gh), messaging platforms
 #   backup.sh   → restic backups to Backblaze B2 (nightly timer)
-#   update.sh   → pull public images + agent/CLI rebuild + recreate (weekly timer)
-#   heal.sh     → restarts unhealthy / starts exited containers (every minute, systemd timer)
+#   update.sh   → pull public images + recreate, new Hermes release (hermes-host.sh), CLIs (nightly timer)
+#   heal.sh     → restarts unhealthy / starts exited containers, restarts a hung Hermes (every minute)
 #   harden.sh   → host isolation (user hermes, Tailscale, ufw, sshd) — before install.sh
 #
 # Do not checkout this compose on the live VPS before migrate-single-agent.sh has
@@ -15,18 +17,19 @@
 # sticky named profile and steals :8642; update.sh refuses while that file exists.
 #
 # Topology (everything is tailnet-only; harden.sh blocks Docker-published ports on the WAN NIC):
-#   traefik ──proxy──▶ hermes-agent ─ :9120 dashboard (basic auth) = https://HERMES_HOST, also
-#      │                             │       published raw on DESKTOP_BIND:9120 for Hermes Desktop
-#      └─▶ docker-socket-proxy       └ :8642 gateway API (127.0.0.1 only)
-#          (read-only view of the Docker API)
+#   traefik ──file route──▶ host: hermes-dashboard DESKTOP_BIND:9120 (basic auth) = https://HERMES_HOST,
+#      │                    also raw on DESKTOP_BIND:9120 for Hermes Desktop (ufw: proxy subnet → 9120)
+#      │                    host: hermes-gateway, API on 127.0.0.1:8642
+#      └─▶ docker-socket-proxy (read-only view of the Docker API, for the other routes' labels)
+#   postgres: 127.0.0.1:5432 (the agent on the host) + DESKTOP_BIND:5432 (tailnet)
 #   dns :53 on the Tailscale IP — answers DNS_ZONE and *.DNS_ZONE with that IP, for Tailscale
 #   split DNS (admin console → DNS → nameserver restricted to DNS_ZONE). obsidian-sync (profile obsidian)
 #   Orca is NOT a container: orca.sh installs it on the host as a systemd service (orca.service).
 #   herdr is NOT a container either: herdr.sh installs it for the operator user (ssh hermes@vps → herdr).
 #
-# The dashboard is the image's own s6-supervised service (HERMES_DASHBOARD=1) inside hermes-agent:
-# same PID namespace as the gateway (liveness detection) and no second container to keep in sync.
-# A non-loopback bind engages its auth gate, satisfied by the bundled username/password provider.
+# Hermes on the host = hermes-gateway.service + hermes-dashboard.service, env /etc/hermes/agent.env
+# (what the hermes-agent `environment:` block below set). A non-loopback dashboard bind engages its
+# auth gate, satisfied by the bundled username/password provider (DESKTOP_USERNAME/PASSWORD).
 
 # Fixed project name: the checkout moved from /srv/hermes/stack to /srv/command-center, and a
 # compat symlink must never make compose derive a second project from the directory name.
@@ -115,6 +118,9 @@ services:
       - --providers.docker.endpoint=tcp://docker-socket-proxy:2375
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=proxy
+      # Routes to services on the host (Hermes' dashboard): hermes-host.sh units writes them.
+      - --providers.file.directory=/dynamic
+      - --providers.file.watch=true
       - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL:?set by install.sh}
       - --certificatesresolvers.cloudflare.acme.storage=/acme/acme.json
       - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
@@ -129,6 +135,7 @@ services:
       - "${DESKTOP_BIND:-127.0.0.1}:443:443"
     volumes:
       - ${TRAEFIK_DIR:-./state/traefik}/acme.json:/acme/acme.json
+      - ${TRAEFIK_DIR:-./state/traefik}/dynamic:/dynamic:ro
     networks:
       - proxy
       - docker-api
@@ -138,7 +145,12 @@ services:
       timeout: 5s
       retries: 3
 
+  # ROLLBACK ONLY — Hermes runs on the host (hermes-host.sh). Same data dir: never run both (the
+  # gateway lock and the bot tokens would fight). Back to the container:
+  #   sudo systemctl disable --now hermes-gateway hermes-dashboard
+  #   sudo docker compose --profile agent-docker up -d hermes-agent
   hermes-agent:
+    profiles: ["agent-docker"]
     build:
       context: ./hermes
       pull: true
@@ -226,7 +238,8 @@ services:
       traefik.http.services.hermes.loadbalancer.server.port: "${DESKTOP_PORT:-9120}"
 
   # PostgreSQL for your own structured data (weight, training logs, whatever the agent should
-  # keep in tables). Reachable as hermes-postgres:5432 from the agent and from the tailnet on
+  # keep in tables). Reachable on 127.0.0.1:POSTGRES_PORT from the agent (host), as
+  # hermes-postgres:5432 from containers on hermes-data, and from the tailnet on
   # DESKTOP_BIND:POSTGRES_PORT for a desktop client. Data dir bind-mounted under POSTGRES_DIR/data;
   # backup.sh writes a daily pg_dumpall to POSTGRES_DIR/dumps (the consistent copy restic uploads —
   # the live data dir is not backed up).
@@ -254,6 +267,7 @@ services:
     networks:
       - data
     ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"   # Hermes on the host (PGHOST=127.0.0.1)
       - "${DESKTOP_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -h 127.0.0.1 >/dev/null || exit 1"]
@@ -302,7 +316,7 @@ services:
 
   # Obsidian Sync headless client (`ob`) on the official node image. obsidian-headless is
   # installed at start into the persistent HOME volume (obsidian/entrypoint.sh).
-  # Keeps /srv/workspace/<vault> (same path inside hermes-agent) in sync with your
+  # Keeps /srv/workspace/<vault> (where the agent reads it) in sync with your
   # Obsidian Sync remote vault. Single sync client per vault: the agent only reads/writes files.
   # Disabled until configured: `sudo ./auth.sh obsidian` runs `ob login` + `ob sync-setup`
   # against the same HOME volume and enables the `obsidian` compose profile.

@@ -57,6 +57,8 @@ if ! id "$OP_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash -p '*' "$OP_USER"
 fi
 groupadd -f docker
+# docker group = root without sudo. Hermes runs as this user: its approval gate (config.yaml
+# approvals, hermes-config) escalates docker like sudo. Kept: helios.sh deploys as this user.
 usermod -aG sudo,docker "$OP_USER"
 # Validate before installing: a bad fragment in sudoers.d breaks sudo for everyone.
 _sudoers="$(mktemp)"
@@ -236,6 +238,8 @@ ufw default allow outgoing >/dev/null
 ufw default deny routed >/dev/null
 ufw allow in on tailscale0 comment 'tailnet: ssh, traefik, everything' >/dev/null
 ufw allow in on "$WAN_IF" to any port 41641 proto udp comment 'tailscale direct' >/dev/null
+# Traefik (a container on the proxy bridge) → Hermes' dashboard on the host (hermes-host.sh units).
+ufw allow proto tcp from "${PROXY_SUBNET:-172.20.0.0/16}" to any port "${DESKTOP_PORT:-9120}" comment 'traefik → hermes dashboard (host)' >/dev/null
 if [ "$KEEP_PUBLIC_SSH" = 1 ]; then
   ufw limit in on "$WAN_IF" to any port 22 proto tcp comment 'public ssh (--keep-public-ssh)' >/dev/null
 fi

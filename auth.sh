@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Interactive OAuth logins for the Hermes stack. Commands run inside the running
-# hermes-agent container as the runtime user with HOME=/opt/data/home, so tokens
-# persist on the host under $HERMES_DATA_DIR/home. GitHub is shared through the
-# container-wide GH_CONFIG_DIR and GIT_CONFIG_GLOBAL settings.
+# Interactive OAuth logins for the Hermes stack. Commands run on the host as the Hermes runtime
+# user with its environment (/etc/hermes/agent.env) and HOME=/opt/data/home, so tokens land under
+# $HERMES_DATA_DIR/home — the agent's own logins, separate from the operator's /home/hermes.
+# GitHub is shared through GH_CONFIG_DIR and GIT_CONFIG_GLOBAL (agent.env).
 #
 #   sudo ./auth.sh                 # menu
 #   sudo ./auth.sh <target>        # hermes | claude | claude-token | codex | grok | gh | messaging | obsidian | status | shell | chat
@@ -12,10 +12,10 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 load_env
 
-# Everything but obsidian/status runs inside the agent container.
+# Everything but obsidian/status runs as the agent: needs an installed release and its env.
 case "${1:-}" in 8|obsidian|9|status) ;; *)
-  running="$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null || echo false)"
-  [ "$running" = true ] || die "hermes-agent is not running. Run ./install.sh or: docker compose up -d" ;;
+  [ -e "$HERMES_CURRENT/.release" ] && [ -r "$AGENT_ENV" ] \
+    || die "Hermes is not installed on the host (sudo command-center hermes status)" ;;
 esac
 
 do_hermes() {
@@ -38,7 +38,7 @@ do_claude() {
   sed -i '/^CLAUDE_CODE_OAUTH_TOKEN=/d' "$envf"
   set_env CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR /opt/data/home/.claude "$envf"
   chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
-  info "Claude subscription login selected for Hermes. Restart hermes-agent to apply it."
+  info "Claude subscription login selected for Hermes. Apply it: sudo command-center hermes restart"
 }
 
 do_claude_token() {
@@ -56,7 +56,7 @@ do_claude_token() {
     sed -i '/^CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/d' "$envf"
     set_env CLAUDE_CODE_OAUTH_TOKEN "$tok" "$envf"
     chown "$HERMES_UID:$HERMES_GID" "$envf"; chmod 600 "$envf"
-    info "Stored in $envf. Apply with: docker compose up -d --force-recreate hermes-agent"
+    info "Stored in $envf. Apply it: sudo command-center hermes restart"
   fi
 }
 
@@ -71,7 +71,7 @@ do_grok() {
 }
 
 do_gh() {
-  info "GitHub CLI login (device flow; container gh — Orca has its own: sudo $STACK_DIR/orca.sh login gh)."
+  info "GitHub CLI login (device flow; the agent's gh — Orca has its own: sudo $STACK_DIR/orca.sh login gh)."
   agent_exec gh auth login --web --git-protocol https
   # git pushes over https reuse the gh token; commits need an identity (~/.gitconfig persists under /opt/data/home).
   agent_run gh auth setup-git || warn "gh auth setup-git failed — git push will prompt for credentials"
@@ -93,13 +93,13 @@ do_messaging() {
   read -r -p "Recreate the gateway now to apply the new platforms? [Y/n] " a
   case "${a:-y}" in
     [yY]*) restart_agent ;;
-    *) info "Later: cd $STACK_DIR && docker compose up -d --force-recreate hermes-agent" ;;
+    *) info "Later: sudo command-center hermes restart" ;;
   esac
 }
 
 do_status() {
-  if [ "$(docker inspect -f '{{.State.Running}}' hermes-agent 2>/dev/null)" != true ]; then
-    echo "── hermes-agent is NOT running (logins not shown): docker compose ps ──"
+  if ! agent_running; then
+    echo "── Hermes is NOT running (logins not shown): sudo command-center hermes status ──"
   else agent_run sh -c '
     echo "── hermes providers ──"; hermes auth list 2>&1 || true; hermes config get model 2>&1 || true
     echo; echo "── claude ──"
@@ -139,7 +139,7 @@ do_status() {
   echo "https://${HERMES_HOST:-?}  (raw: http://${DESKTOP_BIND:-?}:${DESKTOP_PORT:-9120})  $_st"
   echo "login: DESKTOP_USERNAME=${DESKTOP_USERNAME:-admin} from .env — unless a secret source in Hermes' config.yaml sets HERMES_DASHBOARD_BASIC_AUTH_*, which wins (README: Dashboard login)"
   echo; echo "── postgres ──"
-  echo "hermes-postgres: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-postgres 2>/dev/null || echo 'not created')  db ${POSTGRES_DB} user ${POSTGRES_USER} → ${DESKTOP_BIND:-?}:${POSTGRES_PORT:-5432} (tailnet), hermes-postgres:5432 (agent)  last dump: $(ls -1t "$POSTGRES_DIR"/dumps/pg_dumpall-*.sql.gz 2>/dev/null | head -n1 | xargs -r basename)"
+  echo "hermes-postgres: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-postgres 2>/dev/null || echo 'not created')  db ${POSTGRES_DB} user ${POSTGRES_USER} → ${DESKTOP_BIND:-?}:${POSTGRES_PORT:-5432} (tailnet), 127.0.0.1:${POSTGRES_PORT:-5432} (agent)  last dump: $(ls -1t "$POSTGRES_DIR"/dumps/pg_dumpall-*.sql.gz 2>/dev/null | head -n1 | xargs -r basename)"
   echo; echo "── dns ──"
   echo "hermes-dns: $(docker inspect -f '{{.State.Status}} ({{.State.Health.Status}})' hermes-dns 2>/dev/null || echo 'not created')  ${DNS_ZONE:-$HERMES_HOST} + *.${DNS_ZONE:-$HERMES_HOST} → ${DESKTOP_BIND:-?}:53  (Tailscale split DNS → this IP, restricted to that domain)"
   echo; echo "── orca (host) ──"
@@ -166,7 +166,7 @@ do_status() {
 
 do_obsidian() {
   info "Obsidian Sync headless client (requires an Obsidian Sync subscription)."
-  info "Vault: host $HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR  = agent /workspace/$OBSIDIAN_VAULT_DIR  = sync client /vault"
+  info "Vault: $HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR (host and agent)  = sync client /vault"
   mkdir -p "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
   no_symlink "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
   chown "$HERMES_UID:$HERMES_GID" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR" "$OBSIDIAN_DIR"
@@ -197,8 +197,7 @@ do_obsidian() {
 }
 
 do_shell() { agent_exec bash; }
-# Interactive Hermes CLI in the agent container: same config, sessions and /workspace as the
-# gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
+# Interactive Hermes CLI as the agent: same config, sessions and workspace as the gateway. Extra args go to `hermes chat` (e.g. --tui, --resume <session>, -m <model>).
 do_chat() { shift; agent_exec hermes chat "$@"; }
 
 # Validate first, then run the target plainly: `run_target … || …` would switch `set -e` off
@@ -239,8 +238,8 @@ Hermes stack — auth
   7) messaging     Telegram / Discord / Slack / WhatsApp… (hermes gateway setup)
   8) obsidian      Obsidian Sync     (ob login + ob sync-setup, starts the obsidian-sync sidecar)
   9) status        Show login state
- 10) shell         Shell inside the agent container
- 11) chat          Hermes CLI chat inside the agent container (hermes chat)
+ 10) shell         Shell as the agent (its env, HOME=/opt/data/home)
+ 11) chat          Hermes CLI chat (hermes chat)
   q) quit
 MENU
   read -r -p "> " choice

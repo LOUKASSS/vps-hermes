@@ -1,15 +1,16 @@
-"""Hermes work probe — runs INSIDE hermes-agent, as the runtime uid (lib/agent-sessions.sh pipes it:
-docker exec -i hermes-agent python3 - <mode> … < lib/hermes-probe.py).
+"""Hermes work probe — runs as the runtime user with Hermes' own python (lib/agent-sessions.sh pipes
+it: agent_run python3 - <mode> … < lib/hermes-probe.py; the venv preloads the fixed SQLite).
 
-  busy <recent_s>       one line per piece of work a recreate of the container would cut:
-                        gateway turn (live turn lease), cron job, kanban run, async delegation,
-                        or any open session that wrote a message in the last <recent_s> seconds
+  busy <recent_s>       one line per piece of work a restart of hermes-gateway / hermes-dashboard
+                        would cut: gateway turn (live turn lease), cron job, kanban run, async
+                        delegation, or any open non-CLI session that wrote a message in the last
+                        <recent_s> seconds (CLI sessions are separate processes a restart leaves alone)
   ended <id> <since>    exit 0 when <id> is a CLI session that ended at/after <since> (epoch s)
 
-Read-only (sqlite mode=ro). PIDs are checked in this container's /proc together with their kernel
-start time (field 22 of /proc/<pid>/stat, what Hermes itself records), so rows left 'running' by a
-container that was killed never count. A missing database is "nothing there"; a database that
-cannot be read is reported on stderr and does not block (a schema change must not hold every update).
+Read-only (sqlite mode=ro). PIDs are checked in /proc together with their kernel start time (field
+22 of /proc/<pid>/stat, what Hermes itself records), so rows left 'running' by a process that was
+killed never count. A missing database is "nothing there"; a database that cannot be read is
+reported on stderr and does not block (a schema change must not hold every update).
 """
 import os
 import sqlite3
@@ -44,7 +45,7 @@ def start_ticks(pid):
 
 
 def alive(pid, started=None):
-    """pid runs in this container (and is the same process when its start time was recorded)."""
+    """pid runs (and is the same process when its start time was recorded)."""
     if not pid or not os.path.isdir(f"/proc/{int(pid)}"):
         return False
     if started is None:
@@ -84,7 +85,7 @@ def busy(recent):
     for sid, source, last in query(
             "state.db",
             "SELECT s.id, s.source, MAX(m.timestamp) FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE m.timestamp > ? AND s.ended_at IS NULL GROUP BY s.id", (now - recent,)):
+            "WHERE m.timestamp > ? AND s.ended_at IS NULL AND s.source != 'cli' GROUP BY s.id", (now - recent,)):
         out.append(f"{source} session {sid} active {int(now - last)} s ago")
     for line in out:
         print(line.replace("\n", " "))
