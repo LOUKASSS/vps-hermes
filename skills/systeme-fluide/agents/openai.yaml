@@ -1,4 +1,0 @@
-interface:
-  display_name: "Système Fluide + Delavier"
-  short_description: "Coacher nutrition et entraînement Système Fluide."
-  default_prompt: "Utilise $systeme-fluide pour revoir ma phase actuelle et mon programme d'entraînement."

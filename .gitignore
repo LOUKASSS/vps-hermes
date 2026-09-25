@@ -17,6 +17,3 @@ hermes-ssh/
 discord.txt
 *.token
 *.tokens
-mcp/**/node_modules/
-mcp/**/dist/
-mcp/**/.built-from

@@ -18,6 +18,9 @@
 #   sudo ./herdr.sh rollback       # back to the binary that ran before the last update
 #   sudo ./herdr.sh creds          # copy the agent's grok / gh logins into /home/hermes
 #   sudo ./herdr.sh login <claude|codex|grok|gh>   # or log in separately as hermes
+#   sudo ./herdr.sh apply [all|config|workspaces [--dry-run]|plugins|diff]
+#                                  # the operator's herdr-config repo (cloned when missing): committed
+#                                  # config.toml, one workspace per repo, pinned plugins — run as hermes
 #   sudo ./herdr.sh status | logs | restart | remove
 set -euo pipefail
 
@@ -26,6 +29,7 @@ set -euo pipefail
 need_root
 load_env
 : "${HERDR_MEM_LIMIT:=4g}"
+: "${HERDR_CONFIG_DIR:=$HERMES_WORKSPACE_DIR/projects/herdr-config}" "${HERDR_CONFIG_REPO:=https://github.com/LOUKASSS/herdr-config.git}"
 
 HERDR_BIN="$OP_HOME/.local/bin/herdr"
 HERDR_CFG_DIR="$OP_HOME/.config/herdr"
@@ -74,19 +78,20 @@ install_herdr() {
   info "  $(hd --version)"
 }
 
-# config.toml is written once (then it is the operator's file); the workspace keys are enforced.
+# config.toml is seeded once (then it is the operator's file, managed from the herdr-config repo:
+# `herdr.sh apply config` installs its committed copy — never a symlink into the workspace).
 write_config() {
   local f="$HERDR_CFG_DIR/config.toml"
   no_symlink "$f"
   if [ ! -f "$f" ]; then
     cat > "$f" <<EOF
-# herdr config — seeded by $STACK_DIR/herdr.sh (edit freely; \`herdr server reload-config\` applies it).
+# herdr config — seeded by $STACK_DIR/herdr.sh; source of truth: $HERDR_CONFIG_REPO (herdr.sh apply config).
 # Full reference: herdr --default-config
 onboarding = false
 
 [terminal]
-# New panes / tabs / workspaces start in the shared workspace (same path as the Hermes agent and Orca).
-new_cwd = "$HERMES_WORKSPACE_DIR"
+# New panes and tabs inherit the cwd of their workspace (one workspace per repo: herdr.sh apply workspaces).
+new_cwd = "follow"
 
 [worktrees]
 # Worktrees live in the workspace too, so the agent container and Orca see them at the same path.
@@ -97,8 +102,6 @@ resume_agents_on_restore = true
 EOF
     chown "$OP_USER:$OP_USER" "$f"; chmod 644 "$f"
     info "  wrote $f"
-  else
-    grep -q "new_cwd = \"$HERMES_WORKSPACE_DIR\"" "$f" || warn "  $f exists: check [terminal] new_cwd = \"$HERMES_WORKSPACE_DIR\" (not rewritten)"
   fi
   install -d -m 0755 -o "$HERMES_UID" -g "$HERMES_GID" "$HERMES_WORKSPACE_DIR/worktrees/herdr"
 }
@@ -199,8 +202,11 @@ do_install() {
   install_integrations
   write_service
   start_server
-  # A named workspace per first run, rooted at the workspace (idempotent: only when none exists).
-  if [ "$(hd workspace list 2>/dev/null | grep -o '"workspace_id"' | wc -l)" = 0 ]; then
+  # herdr-config: committed config, one workspace per repo, pinned plugins. Without it (not
+  # cloned yet: needs the operator's gh login), one workspace rooted at the shared workspace.
+  if clone_config; then
+    as_op "$HERDR_CONFIG_DIR/bin/herdr-apply" all || warn "herdr-apply failed: sudo $0 apply"
+  elif [ "$(hd workspace list 2>/dev/null | grep -o '"workspace_id"' | wc -l)" = 0 ]; then
     hd workspace create --cwd "$HERMES_WORKSPACE_DIR" --label workspace --no-focus >/dev/null 2>&1 || true
   fi
   do_status
@@ -244,6 +250,22 @@ do_rollback() {
   info "herdr ${cur:-?} → $(hd --version | awk '{print $2}') (running server: sudo $0 restart, ends running panes)"
 }
 
+# herdr-config (HERDR_CONFIG_DIR) is cloned as the operator; it lives in the workspace, so it is
+# only ever run as the operator (herdr-apply applies its committed files), never as root.
+clone_config() {
+  [ -d "$HERDR_CONFIG_DIR/.git" ] && return 0
+  info "Cloning $HERDR_CONFIG_REPO → $HERDR_CONFIG_DIR (as $OP_USER)…"
+  as_op git clone -q "$HERDR_CONFIG_REPO" "$HERDR_CONFIG_DIR" && return 0
+  warn "clone failed — log in as $OP_USER first: sudo $0 login gh"
+  return 1
+}
+
+do_apply() {
+  installed || die "herdr is not installed: sudo $0 install"
+  clone_config || exit 1
+  as_op "$HERDR_CONFIG_DIR/bin/herdr-apply" "${@:-all}"
+}
+
 do_login() {
   [ -t 0 ] || die "login needs a terminal"
   case "${1:-}" in
@@ -280,9 +302,10 @@ case "${1:-}" in
   rollback) do_rollback ;;
   creds)   sync_creds --force ;;
   login)   do_login "${2:-}" ;;
+  apply)   shift; do_apply "$@" ;;
   status)  do_status ;;
   logs)    journalctl -u herdr -f -o cat ;;
   restart) systemctl restart herdr; info "herdr.service restarted (panes restored from the saved layout)" ;;
   remove)  do_remove ;;
-  *) die "usage: $0 install | update [--restart] | rollback | creds | login <claude|codex|grok|gh> | status | logs | restart | remove" ;;
+  *) die "usage: $0 install | update [--restart] | rollback | creds | login <claude|codex|grok|gh> | apply [all|config|workspaces|plugins|diff] | status | logs | restart | remove" ;;
 esac

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Default Hermes agent as code. Replaces profiles.sh at cut-over (install.sh wiring is PR8).
-# Seeds /opt/data (HERMES_HOME) from this repo: union skills, SOUL.md, .no-bundled-skills,
-# health MCP sources, and (when missing) USER.md / config.yaml.
+# Default Hermes agent as code. Seeds /opt/data (HERMES_HOME) from the hermes-config repo
+# (HERMES_CONFIG_DIR, default /srv/workspace/projects/hermes-config — its committed HEAD only, see
+# hermes_config_snapshot in lib/common.sh): union skills, SOUL.md, .no-bundled-skills, health MCP
+# sources, and (when missing) USER.md / config.yaml.
 #
-#   sudo ./agent.sh sync-files                         # host only, agent stopped OK
-#   sudo ./agent.sh sync [--force-config] [--force-soul]
-#   sudo ./agent.sh diff | status
+#   sudo ./agent.sh sync-files [--allow-dirty]         # host only, agent stopped OK
+#   sudo ./agent.sh sync [--force-config] [--force-soul] [--allow-dirty]
+#   sudo ./agent.sh diff | status                      # committed HEAD vs live
+#
+# --allow-dirty also applies the uncommitted changes to tracked files of the checkout (a test).
 #
 # --force-soul is a no-op: SOUL.md is always distribution-owned and overwritten.
 # --force-config copies agent/config.yaml only when live config still looks like the
@@ -46,6 +49,7 @@ for a in "$@"; do
   case "$a" in
     --force-config) FORCE_CONFIG=1 ;;
     --force-soul) FORCE_SOUL=1 ;;
+    --allow-dirty) HERMES_CONFIG_ALLOW_DIRTY=1 ;;
     --*) die "unknown option $a" ;;
     *) die "unexpected argument $a" ;;
   esac
@@ -89,7 +93,7 @@ config_is_upstream_seed() {
 }
 
 sync_config() {
-  local src="$STACK_DIR/agent/config.yaml" dst="$HERMES_DATA_DIR/config.yaml"
+  local src="$HCFG/agent/config.yaml" dst="$HERMES_DATA_DIR/config.yaml"
   [ -f "$src" ] || return 0
   no_symlink "$dst"
   if [ ! -f "$dst" ]; then
@@ -117,8 +121,8 @@ sync_workspace_context() {
   local w="$HERMES_WORKSPACE_DIR"
   [ -d "$w" ] || { warn "  workspace $w missing — skip HERMES.md / AGENTS.md"; return 0; }
   no_symlink "$w/HERMES.md" "$w/AGENTS.md"
-  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/HERMES.md" "$w/HERMES.md"
-  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/WORKSPACE.md" "$w/AGENTS.md"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/HERMES.md" "$w/HERMES.md"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/WORKSPACE.md" "$w/AGENTS.md"
   if [ ! -e "$w/CLAUDE.md" ] || [ -L "$w/CLAUDE.md" ]; then
     ln -sfn AGENTS.md "$w/CLAUDE.md"; chown -h "$HERMES_UID:$HERMES_GID" "$w/CLAUDE.md"
   else
@@ -132,9 +136,9 @@ do_sync_files() {
   require_rsync
   [ "${UPDATE_LOCKED:-}" = 1 ] || lock_update -w 300 || die "heal.sh or update.sh is busy with the stack (lock $UPDATE_LOCK) — try again"
   no_symlink "$HERMES_DATA_DIR"
-  [ -d "$STACK_DIR/skills" ] || die "missing $STACK_DIR/skills"
-  [ -f "$STACK_DIR/agent/SOUL.md" ] || die "missing $STACK_DIR/agent/SOUL.md"
-  [ -f "$STACK_DIR/agent/HERMES.md" ] && [ -f "$STACK_DIR/agent/WORKSPACE.md" ] || die "missing $STACK_DIR/agent/HERMES.md or WORKSPACE.md"
+  [ -d "$HCFG/skills" ] || die "missing $HCFG/skills"
+  [ -f "$HCFG/agent/SOUL.md" ] || die "missing $HCFG/agent/SOUL.md"
+  [ -f "$HCFG/agent/HERMES.md" ] && [ -f "$HCFG/agent/WORKSPACE.md" ] || die "missing $HCFG/agent/HERMES.md or WORKSPACE.md"
 
   info "sync-files → $HERMES_DATA_DIR"
   mkdir -p "$HERMES_DATA_DIR/skills" "$HERMES_DATA_DIR/mcp-src" "$HERMES_DATA_DIR/.hub-lock"
@@ -143,45 +147,45 @@ do_sync_files() {
   # Live .hub caches/lock stay; lock is merged later from .hub-lock (same as profiles.sh stage).
   rsync -a --delete --exclude '/.hub/' "${SKILL_EXCLUDES[@]}" \
     --chown "$HERMES_UID:$HERMES_GID" \
-    "$STACK_DIR/skills/" "$HERMES_DATA_DIR/skills/"
-  info "  skills rsync --delete ($(find "$STACK_DIR/skills" -name SKILL.md | wc -l) SKILL.md in repo)"
+    "$HCFG/skills/" "$HERMES_DATA_DIR/skills/"
+  info "  skills rsync --delete ($(find "$HCFG/skills" -name SKILL.md | wc -l) SKILL.md in repo)"
 
   # SOUL is distribution-owned: always overwritten. --force-soul is a documented no-op.
   : "$FORCE_SOUL"
   no_symlink "$HERMES_DATA_DIR/SOUL.md"
-  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/SOUL.md" "$HERMES_DATA_DIR/SOUL.md"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/SOUL.md" "$HERMES_DATA_DIR/SOUL.md"
   info "  SOUL.md"
 
   sync_workspace_context
 
   no_symlink "$HERMES_DATA_DIR/.no-bundled-skills"
-  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/.no-bundled-skills" "$HERMES_DATA_DIR/.no-bundled-skills"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/.no-bundled-skills" "$HERMES_DATA_DIR/.no-bundled-skills"
   info "  .no-bundled-skills"
 
   no_symlink "$HERMES_DATA_DIR/USER.md"
   if [ ! -f "$HERMES_DATA_DIR/USER.md" ]; then
-    install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/USER.md" "$HERMES_DATA_DIR/USER.md"
+    install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/USER.md" "$HERMES_DATA_DIR/USER.md"
     info "  USER.md seeded (was absent)"
   else
     info "  USER.md left in place"
   fi
 
-  if [ -d "$STACK_DIR/mcp" ]; then
+  if [ -d "$HCFG/mcp" ]; then
     rsync -a --delete \
       --exclude 'node_modules/' --exclude 'dist/' --exclude '.built-from' --exclude 'setup.sh' \
       --chown "$HERMES_UID:$HERMES_GID" \
-      "$STACK_DIR/mcp/" "$HERMES_DATA_DIR/mcp-src/"
+      "$HCFG/mcp/" "$HERMES_DATA_DIR/mcp-src/"
     info "  mcp-src (sources + lockfiles, no node_modules/dist)"
   else
     warn "  repo mcp/ missing — skip mcp-src rsync"
   fi
   # Repo is not mounted in the container; profiles.sh did the same via distributions/<name>/setup.sh.
-  install -m 755 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/setup.sh" "$HERMES_DATA_DIR/mcp-src/setup.sh"
+  install -m 755 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/setup.sh" "$HERMES_DATA_DIR/mcp-src/setup.sh"
   info "  mcp-src/setup.sh"
 
-  if [ -d "$STACK_DIR/skills/.hub" ]; then
+  if [ -d "$HCFG/skills/.hub" ]; then
     rsync -a --delete --chown "$HERMES_UID:$HERMES_GID" \
-      "$STACK_DIR/skills/.hub/" "$HERMES_DATA_DIR/.hub-lock/"
+      "$HCFG/skills/.hub/" "$HERMES_DATA_DIR/.hub-lock/"
   fi
 
   sync_config
@@ -191,7 +195,7 @@ do_sync_files() {
 
 # Repo lock entries win; entries for skills only installed live survive.
 merge_hub_lock() {
-  [ -f "$STACK_DIR/skills/.hub/lock.json" ] || return 0
+  [ -f "$HCFG/skills/.hub/lock.json" ] || return 0
   agent_run python3 - <<'PY'
 import json, os, shutil
 hub = "/opt/data/skills/.hub"
@@ -232,7 +236,7 @@ assert_no_cli_skills() {
 
 install_plugins() {
   local f line args plug
-  f="$STACK_DIR/agent/plugins.txt"
+  f="$HCFG/agent/plugins.txt"
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"; line="$(echo "$line" | xargs 2>/dev/null || true)"
@@ -286,30 +290,30 @@ do_diff() {
     return 0
   fi
   for f in SOUL.md USER.md .no-bundled-skills config.yaml; do
-    if [ -f "$live/$f" ] && [ -f "$STACK_DIR/agent/$f" ]; then
-      diff -q "$live/$f" "$STACK_DIR/agent/$f" >/dev/null || echo "  M $f"
-    elif [ -f "$STACK_DIR/agent/$f" ] && [ ! -f "$live/$f" ]; then
+    if [ -f "$live/$f" ] && [ -f "$HCFG/agent/$f" ]; then
+      diff -q "$live/$f" "$HCFG/agent/$f" >/dev/null || echo "  M $f"
+    elif [ -f "$HCFG/agent/$f" ] && [ ! -f "$live/$f" ]; then
       echo "  + $f (repo only)"
-    elif [ -f "$live/$f" ] && [ ! -f "$STACK_DIR/agent/$f" ]; then
+    elif [ -f "$live/$f" ] && [ ! -f "$HCFG/agent/$f" ]; then
       echo "  + $f (live only)"
     fi
   done
-  [ -f "$HERMES_WORKSPACE_DIR/HERMES.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/HERMES.md" "$STACK_DIR/agent/HERMES.md" >/dev/null && echo "  M workspace HERMES.md"
-  [ -f "$HERMES_WORKSPACE_DIR/AGENTS.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/AGENTS.md" "$STACK_DIR/agent/WORKSPACE.md" >/dev/null && echo "  M workspace AGENTS.md"
+  [ -f "$HERMES_WORKSPACE_DIR/HERMES.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/HERMES.md" "$HCFG/agent/HERMES.md" >/dev/null && echo "  M workspace HERMES.md"
+  [ -f "$HERMES_WORKSPACE_DIR/AGENTS.md" ] && ! diff -q "$HERMES_WORKSPACE_DIR/AGENTS.md" "$HCFG/agent/WORKSPACE.md" >/dev/null && echo "  M workspace AGENTS.md"
   if [ -d "$live/skills" ]; then
-    rsync -rlt -n -i -m -O -c --delete --exclude '/.hub/' "${SKILL_EXCLUDES[@]}" \
-      "$STACK_DIR/skills/" "$live/skills/" | sed 's/^/  skills: /'
+    rsync -rl -n -i -m -c --delete --exclude '/.hub/' "${SKILL_EXCLUDES[@]}" \
+      "$HCFG/skills/" "$live/skills/" | sed 's/^/  skills: /'
   else
     echo "  skills: (live absent)"
   fi
-  if [ -d "$STACK_DIR/mcp" ]; then
-    rsync -rlt -n -i -c --delete \
+  if [ -d "$HCFG/mcp" ]; then
+    rsync -rl -n -i -c --delete \
       --exclude 'node_modules/' --exclude 'dist/' --exclude '.built-from' --exclude 'setup.sh' \
-      "$STACK_DIR/mcp/" "$live/mcp-src/" | sed 's/^/  mcp-src: /'
+      "$HCFG/mcp/" "$live/mcp-src/" | sed 's/^/  mcp-src: /'
   fi
-  if [ -f "$STACK_DIR/agent/setup.sh" ] && [ -f "$live/mcp-src/setup.sh" ]; then
-    diff -q "$STACK_DIR/agent/setup.sh" "$live/mcp-src/setup.sh" >/dev/null || echo "  M mcp-src/setup.sh"
-  elif [ -f "$STACK_DIR/agent/setup.sh" ] && [ ! -f "$live/mcp-src/setup.sh" ]; then
+  if [ -f "$HCFG/agent/setup.sh" ] && [ -f "$live/mcp-src/setup.sh" ]; then
+    diff -q "$HCFG/agent/setup.sh" "$live/mcp-src/setup.sh" >/dev/null || echo "  M mcp-src/setup.sh"
+  elif [ -f "$HCFG/agent/setup.sh" ] && [ ! -f "$live/mcp-src/setup.sh" ]; then
     echo "  + mcp-src/setup.sh (repo only)"
   fi
 }
@@ -317,8 +321,8 @@ do_diff() {
 do_status() {
   local live="$HERMES_DATA_DIR" sk soul pl stamps chief
   echo
-  if [ -f "$live/SOUL.md" ] && [ -f "$STACK_DIR/agent/SOUL.md" ]; then
-    if diff -q "$live/SOUL.md" "$STACK_DIR/agent/SOUL.md" >/dev/null; then soul="in sync"
+  if [ -f "$live/SOUL.md" ] && [ -f "$HCFG/agent/SOUL.md" ]; then
+    if diff -q "$live/SOUL.md" "$HCFG/agent/SOUL.md" >/dev/null; then soul="in sync"
     else soul="differs from repo"; fi
   elif [ -f "$live/SOUL.md" ]; then soul="live only"
   else soul="absent"; fi
@@ -360,10 +364,12 @@ do_status() {
 }
 
 case "$cmd" in
-  sync-files) do_sync_files ;;
-  sync) do_sync ;;
-  diff) do_diff ;;
-  status) do_status ;;
-  -h|--help|help|"") sed -n '2,23p' "$0" ;;
-  *) die "usage: $0 {sync-files|sync|diff|status} [--force-config] [--force-soul]" ;;
+  sync-files) hermes_config_snapshot; do_sync_files ;;
+  sync) hermes_config_snapshot; do_sync ;;
+  diff) hermes_config_snapshot --diff; do_diff ;;
+  status)
+    if [ -d "$HERMES_CONFIG_DIR/.git" ]; then hermes_config_snapshot --diff >/dev/null; else HCFG=/nonexistent; warn "missing $HERMES_CONFIG_DIR (hermes-config)"; fi
+    do_status ;;
+  -h|--help|help|"") sed -n '2,26p' "$0" ;;
+  *) die "usage: $0 {sync-files|sync|diff|status} [--force-config] [--force-soul] [--allow-dirty]" ;;
 esac

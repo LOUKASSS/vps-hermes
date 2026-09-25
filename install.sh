@@ -131,11 +131,14 @@ chown "$HERMES_UID:$HERMES_GID" .env; chmod 600 .env
 
 # Seed config.yaml BEFORE the first compose up — otherwise the image writes the
 # upstream Hermes seed (_config_version, no MCP, multiplex on).
+# The agent's config lives in the hermes-config repo (HERMES_CONFIG_DIR, cloned when missing).
+hermes_config_ensure
 if [ ! -f "$HERMES_DATA_DIR/config.yaml" ]; then
-  [ -f "$STACK_DIR/agent/config.yaml" ] || die "missing $STACK_DIR/agent/config.yaml"
-  info "Seeding $HERMES_DATA_DIR/config.yaml from agent/config.yaml"
+  hermes_config_snapshot
+  [ -f "$HCFG/agent/config.yaml" ] || die "missing agent/config.yaml in $HERMES_CONFIG_DIR"
+  info "Seeding $HERMES_DATA_DIR/config.yaml from hermes-config agent/config.yaml"
   no_symlink "$HERMES_DATA_DIR/config.yaml"
-  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$STACK_DIR/agent/config.yaml" "$HERMES_DATA_DIR/config.yaml"
+  install -m 644 -o "$HERMES_UID" -g "$HERMES_GID" "$HCFG/agent/config.yaml" "$HERMES_DATA_DIR/config.yaml"
 fi
 
 # ── 4. Build + start ─────────────────────────────────────────────────────
@@ -161,9 +164,9 @@ if [ "$(agent_run hermes config get terminal.cwd 2>/dev/null | tr -d '[:space:]'
 fi
 
 # ── 5b. Default agent (skills, SOUL, health MCP) ─────────────────────────
-# Re-run after a git pull that touched agent/ or skills/: sudo CUTOVER=1 ./agent.sh sync
+# Re-run after a change merged in hermes-config (agent/, skills/, mcp/): sudo command-center hermes sync
 if [ "${ALLOW_NON_ROOT:-0}" != 1 ]; then
-  info "Syncing the default agent from agent/ + skills/ + mcp/…"
+  info "Syncing the default agent from hermes-config ($HERMES_CONFIG_DIR)…"
   CUTOVER=1 UPDATE_LOCKED=1 "$STACK_DIR/agent.sh" sync \
     || die "agent.sh sync failed — fix and re-run: sudo CUTOVER=1 UPDATE_LOCKED=1 $STACK_DIR/agent.sh sync"
 fi

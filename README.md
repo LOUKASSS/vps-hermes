@@ -27,7 +27,7 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
     ├── projects/<repo>/        every git repo (helios, indo-vacation, hermes-agent…)
     ├── worktrees/{hermes,orca,herdr}/   git worktrees, per tool
     ├── vault/  scratch/  db/migrations/  helios/ (watchlist data)
-    └── HERMES.md  AGENTS.md  CLAUDE.md → AGENTS.md   (rules for every agent, from agent/)
+    └── HERMES.md  AGENTS.md  CLAUDE.md → AGENTS.md   (rules for every agent, from hermes-config agent/)
 ```
 
 **One place for projects.** The Hermes agent (container), Orca sessions (host, `/srv/orca`
@@ -87,7 +87,7 @@ wrote through its historical `/workspace` mount (kanban worktrees, old sessions)
 too. `hermes-agent` mounts it twice: at `/srv/workspace` (canonical, `terminal.cwd`) and at
 `/workspace` (alias). `agent.sh sync-files` writes the workspace rules: `HERMES.md` (read by Hermes),
 `AGENTS.md` (Codex, Grok…), `CLAUDE.md → AGENTS.md` (Claude Code) — from `agent/HERMES.md` and
-`agent/WORKSPACE.md`. `sudo command-center workspace fix` re-chowns the tree to the one owner.
+`agent/WORKSPACE.md` of hermes-config. `sudo command-center workspace fix` re-chowns the tree to the one owner.
 
 Treat the workspace as **untrusted for sudo**: the agent writes there, and `helios deploy` builds
 what `projects/helios` contains — review the diff before deploying.
@@ -97,8 +97,14 @@ what `projects/helios` contains — review the diff before deploying.
 `sudo command-center herdr install` (`herdr.sh`):
 
 - installs herdr for `hermes` with the official sha256-verified installer (`~/.local/bin/herdr`),
-  seeds `~/.config/herdr/config.toml` (`onboarding = false`, new panes in `/srv/workspace`,
+  seeds `~/.config/herdr/config.toml` (`onboarding = false`, `new_cwd = "follow"`,
   worktrees in `/srv/workspace/worktrees/herdr`, native agent resume on restore);
+- clones [herdr-config](https://github.com/LOUKASSS/herdr-config) (`HERDR_CONFIG_DIR`, default
+  `/srv/workspace/projects/herdr-config`) and runs its `bin/herdr-apply all` as `hermes`: the
+  **committed** `config.toml` (a copy, never a symlink into the workspace — herdr runs config
+  commands as `hermes`), pinned plugins, and **one workspace per repo** opened at its root, so
+  herdr-sidebar's source control and `prefix+shift+g` worktrees follow the right repo.
+  Later: `sudo command-center herdr apply [config|workspaces [--dry-run]|plugins|diff]`;
 - installs the plugin `zenbu-labs/terminal-code/herdr-plugin` (builds `tode` into `~/.local/lib/tode`)
   and the herdr integrations for `claude`, `codex`, `grok` (session restore);
 - runs `herdr server` as **`herdr.service`** (`User=hermes`, `HOME=/home/hermes`, `MemoryMax=HERDR_MEM_LIMIT`):
@@ -242,7 +248,7 @@ sudo ./auth.sh        # OAuth logins (menu)
 `install.sh` is idempotent. It writes `.env` (generated secrets: `API_SERVER_KEY`,
 `DESKTOP_PASSWORD`, `DESKTOP_SECRET`), creates `/srv/workspace` (+ the `/workspace` host link), `data/private`,
 `data/mcp` owned by `hermes` (fallback: the invoking `SUDO_UID`; credential dirs are mode 700),
-copies `agent/config.yaml` into `data/` **before** the first `compose up`, sets `DESKTOP_BIND`
+clones hermes-config when missing, copies its `agent/config.yaml` into `data/` **before** the first `compose up`, sets `DESKTOP_BIND`
 to the Tailscale IP, builds **only** the thin `hermes-agent` image (`compose build --pull hermes-agent`),
 starts the stack, runs `CUTOVER=1 agent.sh sync`, installs the systemd timers and sets
 the agent's working directory to `/srv/workspace`. Everything under `/srv` belongs to `hermes`
@@ -340,14 +346,15 @@ variables, **its values are the effective login**, not the `DESKTOP_*` ones prin
 `sudo ./auth.sh status` (dashboard line) shows the gate and the URL.
 
 There is **one** agent: `HERMES_HOME=/opt/data`, command `hermes gateway run`, healthcheck
-`/health`. Skills are the union under `data/skills/` (synced from this repo). No sticky
+`/health`. Skills are the union under `data/skills/` (synced from hermes-config). No sticky
 `data/active_profile`, no gateway multiplex, no named-profile routing. `hermes` without `-p`
 edits the default config.
 
-## Agent as code (`agent/`, `skills/`, `agent.sh`)
+## Agent as code ([hermes-config](https://github.com/LOUKASSS/hermes-config), `agent.sh`)
 
-Persona, config seed, skills and health MCP live in this repo and are copied onto
-`/opt/data` by `agent.sh` (not `hermes profile install`):
+Persona, config seed, skills and health MCP live in their own repo, **hermes-config**, cloned as
+`hermes` in `HERMES_CONFIG_DIR` (default `/srv/workspace/projects/hermes-config`; `install.sh`
+clones it when missing), and are copied onto `/opt/data` by `agent.sh` (not `hermes profile install`):
 
 ```
 agent/SOUL.md          always overwritten on sync (short, French)
@@ -360,14 +367,18 @@ mcp/                   MCP sources + lockfiles → data/mcp-src/
 ```
 
 ```bash
-sudo CUTOVER=1 ./agent.sh sync-files            # host only, agent stopped OK
-sudo CUTOVER=1 ./agent.sh sync [--force-config] # need running agent; builds MCP, plugins
-sudo ./agent.sh diff | status
+sudo command-center hermes agent diff             # committed HEAD of hermes-config vs live
+sudo command-center hermes sync [--allow-dirty]   # = CUTOVER=1 agent.sh sync: MCP, plugins, gateway restart
+sudo ./agent.sh sync-files | status
 ```
 
-`--force-config` only replaces an upstream Hermes seed, never a customized live `config.yaml`.
-SOUL is always distribution-owned. After editing skills: commit, `git pull` on the VPS,
-`sudo CUTOVER=1 ./agent.sh sync`.
+The checkout sits in the workspace, which the agent writes: `agent.sh` never reads it as root. It
+exports the **committed** `HEAD` (git runs as `hermes`) into a root-only temp dir, prints the
+commit it applies and refuses uncommitted changes to tracked files (`--allow-dirty`: applied on
+top, for a test). `--force-config` only replaces an upstream Hermes seed, never a customized live
+`config.yaml`. SOUL is always distribution-owned and skills are synced with `--delete`: a skill
+written live by the agent must be committed to hermes-config first (`agent diff` lists it as
+`*deleting`). After a merge in hermes-config: `git pull` in the checkout, `sudo command-center hermes sync`.
 
 Health / markets sqlite lives in `/opt/data/private/` (host `data/private/`). MCP secrets
 (`HEVY_API_KEY`, `YAZIO_*`, `RENPHO_*`) are names in `data/.env`. Smoke: `hermes mcp test hevy`
@@ -506,7 +517,7 @@ prints the matching `rsync` lines.
    herdr: `sudo command-center herdr install`. Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
 
 All OAuth logins, memory, sessions and skills come back with `data/`. Skills/SOUL/MCP also live
-in this repo: `sudo CUTOVER=1 ./agent.sh sync` rebuilds them without a backup. Hermes-only
+in hermes-config (GitHub): `sudo command-center hermes sync` rebuilds them without a backup. Hermes-only
 alternative into a running agent: `sudo ./auth.sh shell` → `hermes import /opt/data/backups/<zip>`.
 
 ## Files & Python
@@ -734,9 +745,8 @@ Node, Xvfb and the Electron libraries.
 | `helios.sh` | Helios deploy/admin: code `/srv/workspace/projects/helios`, deployment `/srv/helios` |
 | `herdr.sh` / `herdr/herdr.service` | herdr + terminal-code plugin for `hermes`, `herdr server` as a systemd service |
 | `discord-backup.sh` | Discord backup bot: tested releases in `/srv/discord-backup`, units from the repo's `deploy/`, BWS secrets |
-| `agent/WORKSPACE.md` | → `/srv/workspace/AGENTS.md` (+ `CLAUDE.md` link): rules for every agent in the workspace |
 | `migrate-srv-layout.sh` | live move from `/srv/hermes/*` to the `/srv` layout (phase 1 + `finalize` for Orca) |
-| `agent.sh` / `agent/` / `skills/` / `mcp/` | default agent as code (sync-files / sync / diff / status) |
+| `agent.sh` | default agent as code from the hermes-config checkout (sync-files / sync / diff / status) |
 | `migrate-single-agent.sh` | in-place cut-over from six profiles + user `orca` |
 | `harden.sh` | VPS isolation: user `hermes` + key, Tailscale, ufw + DOCKER-USER, sshd, auto-updates |
 | `install.sh` / `auth.sh` / `update.sh` | bootstrap / logins + messaging / nightly update: tested before the swap, automatic `:previous` rollback |
@@ -775,7 +785,7 @@ Node, Xvfb and the Electron libraries.
   six-profile VPS without migrate, restore `.maintenance` and run `migrate-single-agent.sh`.
 - **`[config-migrate] WARNING … predates version 12`** on first boot — benign; the image seeds
   the upstream example config and `hermes setup` / `hermes model` stamp the version. Fresh
-  install copies `agent/config.yaml` first so this should not be the live default.
+  install copies hermes-config's `agent/config.yaml` first so this should not be the live default.
 - **Permission denied under `/srv/hermes` or `/srv/workspace`** — `HERMES_UID`/`HERMES_GID` in `.env` must match the
   directory owner; `sudo command-center workspace fix`, or re-run `sudo ./install.sh`. Right after an update this can also mean the
   upstream image changed its uid handling: `sudo ./update.sh rollback`.

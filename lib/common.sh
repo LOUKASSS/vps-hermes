@@ -61,6 +61,7 @@ load_env() {
   : "${POSTGRES_DIR:=$SRV_ROOT/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
   : "${HELIOS_DIR:=$SRV_ROOT/helios}" "${HELIOS_SRC:=$HERMES_WORKSPACE_DIR/projects/helios}"
   : "${DISCORD_BACKUP_DIR:=$SRV_ROOT/discord-backup}"
+  : "${HERMES_CONFIG_DIR:=$HERMES_WORKSPACE_DIR/projects/hermes-config}" "${HERMES_CONFIG_REPO:=https://github.com/LOUKASSS/hermes-config.git}"
   : "${OP_USER:=hermes}" "${OP_HOME:=$(getent passwd "${OP_USER}" 2>/dev/null | cut -d: -f6)}"
   : "${OP_HOME:=/home/$OP_USER}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
@@ -221,6 +222,47 @@ as_op_home() {
     PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" TERM="${TERM:-xterm}" LANG="${LANG:-C.UTF-8}" "$@"
 }
 as_op() { as_op_home "$OP_HOME" "$@"; }
+
+# The Hermes agent as code (agent/, skills/, mcp/) is its own repo, cloned by the operator in the
+# workspace: HERMES_CONFIG_DIR (github.com/LOUKASSS/hermes-config). The agent writes the workspace,
+# so root never reads that checkout directly — hermes_config_snapshot exports its COMMITTED tree
+# into a root-only temp dir, sets HCFG to it (removed on exit) and prints the commit applied:
+#   - git runs as the operator: a repo's own .git/config (core.fsmonitor, hooks…) never runs as root;
+#   - uncommitted changes to tracked files are refused, unless HERMES_CONFIG_ALLOW_DIRTY=1 (then
+#     they are included, via `git stash create`: neither the tree nor the stash list is touched);
+#   - untracked files are never applied.
+#   hermes_config_snapshot [--diff]    --diff: warn instead of refusing a dirty checkout (HEAD shown)
+hermes_config_snapshot() {
+  local dir="$HERMES_CONFIG_DIR" ref=HEAD dirty head
+  [ -d "$dir/.git" ] || die "missing $dir — clone it as $OP_USER: git clone $HERMES_CONFIG_REPO $dir"
+  dirty="$(as_op git -C "$dir" status --porcelain --untracked-files=no)" || die "git status failed in $dir"
+  head="$(as_op git -C "$dir" log -1 --format='%h %s' HEAD)" || die "no commit in $dir"
+  if [ -n "$dirty" ]; then
+    if [ "${1:-}" = --diff ]; then
+      warn "$dir has uncommitted changes — compared: HEAD ($head)"
+    elif [ "${HERMES_CONFIG_ALLOW_DIRTY:-0}" = 1 ]; then
+      ref="$(as_op git -C "$dir" stash create)" || die "git stash create failed in $dir"
+      warn "applying UNCOMMITTED changes of $dir on top of $head"
+    else
+      die "$dir has uncommitted changes — commit them first (or --allow-dirty to apply them for a test):"$'\n'"$dirty"
+    fi
+  fi
+  HCFG="$(mktemp -d /tmp/hermes-config.XXXXXX)"
+  # shellcheck disable=SC2064  # expand now: the path is fixed
+  trap "rm -rf '$HCFG'" EXIT
+  as_op git -C "$dir" archive --format=tar "$ref" | tar -x --no-same-owner -C "$HCFG" \
+    || die "git archive of $dir failed"
+  info "hermes-config $head${dirty:+ (+ uncommitted changes)}"
+}
+
+# hermes_config_ensure — clone HERMES_CONFIG_REPO as the operator when the checkout is missing
+# (fresh VPS; a private repo needs the operator's gh login: sudo command-center herdr login gh).
+hermes_config_ensure() {
+  [ -d "$HERMES_CONFIG_DIR/.git" ] && return 0
+  info "Cloning $HERMES_CONFIG_REPO → $HERMES_CONFIG_DIR (as $OP_USER)…"
+  as_op git clone -q "$HERMES_CONFIG_REPO" "$HERMES_CONFIG_DIR" \
+    || die "clone failed — log in as $OP_USER (gh auth login) and retry, or clone it yourself: git clone $HERMES_CONFIG_REPO $HERMES_CONFIG_DIR"
+}
 
 # One-off command in the Obsidian sync image (same HOME volume as the sidecar), interactive.
 obsidian_exec() {
