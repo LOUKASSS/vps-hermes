@@ -280,7 +280,7 @@ do_login() {
 do_status() {
   if ! installed; then echo "herdr: not installed (sudo $0 install)"; return 0; fi
   echo "herdr $(hd --version | awk '{print $2}') · $HERDR_BIN · herdr.service: $(systemctl is-active herdr 2>/dev/null || echo n/a) · server: $(server_up && echo running || echo down)"
-  echo "user $OP_USER · HOME=$OP_HOME · panes start in $HERMES_WORKSPACE_DIR"
+  echo "user $OP_USER · HOME=$OP_HOME · new_cwd $(sed -n 's/^new_cwd *= *"\(.*\)"/\1/p' "$HERDR_CFG_DIR/config.toml" 2>/dev/null | head -n1) · config $([ -d "$HERDR_CONFIG_DIR/.git" ] && echo "$HERDR_CONFIG_DIR" || echo "herdr-config not cloned")"
   echo "plugins: $(hd plugin list 2>/dev/null | sed -n 's/^- \([^ ]*\) .* \(enabled\|disabled\).*/\1 (\2)/p' | tr '\n' ' ')"
   echo "tode: $(as_op sh -c 'tode --version 2>/dev/null | head -n1' || echo missing)"
   hd integration status 2>/dev/null | sed 's/^/  /' | head -n 25 || true
