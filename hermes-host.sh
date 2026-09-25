@@ -217,7 +217,8 @@ TZ=${TZ:-UTC}
 LANG=C.UTF-8
 PYTHONUNBUFFERED=1
 PYTHONDONTWRITEBYTECODE=1
-$(legacy_env)HERMES_WEB_DIST=$HERMES_CURRENT/hermes_cli/web_dist
+$(legacy_env)
+HERMES_WEB_DIST=$HERMES_CURRENT/hermes_cli/web_dist
 HERMES_TUI_DIR=$HERMES_CURRENT/ui-tui
 HERMES_DISABLE_LAZY_INSTALLS=1
 HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
@@ -346,9 +347,10 @@ if not any(a.get("event") == "pre_tool_call" and a.get("command") == cmd for a i
     os.chmod(tmp, 0o600); os.replace(tmp, path)
 ' "$HERMES_DATA_DIR/shell-hooks-allowlist.json" "$GUARD"
   hooks="$(hermes_py '
-import json, sys, yaml
+import json, sys
+from hermes_cli.config import read_raw_config_readonly  # Hermes own YAML reader (no PyYAML in pm releases)
 cmd = sys.argv[1]
-with open("/opt/data/config.yaml", encoding="utf-8") as f: cfg = yaml.safe_load(f) or {}
+cfg = read_raw_config_readonly() or {}
 entries = list(((cfg.get("hooks") or {}).get("pre_tool_call")) or [])
 if not any(isinstance(e, dict) and e.get("command") == cmd for e in entries):
     entries.append({"matcher": "terminal|execute_code|write_file|patch", "command": cmd, "timeout": 10, "fail_closed": True})
