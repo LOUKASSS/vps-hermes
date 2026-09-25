@@ -159,7 +159,7 @@ menu() {
    6) deploy herdr      herdr + terminal-code plugin + herdr.service
    7) hermes auth       logins (Hermes model, claude/codex/grok, gh, messaging, obsidian)
    8) hermes shell      shell in the agent container
-   9) hermes sync       re-sync SOUL / skills / MCP / workspace context from this repo
+   9) hermes sync       re-sync SOUL / skills / MCP / workspace context from hermes-config
   10) orca pair         pairing link for the desktop or mobile app
   11) herdr creds       copy the agent's CLI logins for herdr / SSH sessions
   12) workspace fix     ownership + /workspace link + context files
