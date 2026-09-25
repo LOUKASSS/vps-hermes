@@ -27,6 +27,7 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
     ├── projects/<repo>/        one git repo per tool / project, one herdr workspace each:
     │     hermes-config/          the agent as code (SOUL, skills, MCP) → `command-center hermes sync`
     │     herdr-config/           herdr config + workspaces → `command-center herdr apply`
+    │     ai-config/              global Claude Code / Codex / Grok rules, skills, settings → its `bin/ai-apply`
     │     personal-db/            Postgres migrations (health, markets); db → projects/personal-db
     │     helios/  discord-backup-bot/  indo-vacation/  hermes-agent/
     ├── worktrees/{hermes,orca,herdr}/   git worktrees, per tool
