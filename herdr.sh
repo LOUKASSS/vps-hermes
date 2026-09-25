@@ -9,12 +9,14 @@
 # Panes start in the shared workspace (/srv/workspace — the same path the Hermes agent and Orca
 # use), herdr worktrees go to /srv/workspace/worktrees/herdr. HOME is the login HOME of `hermes`
 # (/home/hermes), separate from the agent's (/srv/hermes/data/home) and Orca's (/srv/orca): only
-# credential FILES are copied between them (`herdr.sh creds`), never config files — same rule as
-# orca.sh.
+# grok / gh credential FILES are copied between them (`herdr.sh creds`), never config files — same
+# rule as orca.sh. Claude and Codex rotate their refresh token: own login (`herdr.sh login`).
 #
 #   sudo ./herdr.sh install        # herdr + config + terminal-code plugin (tode) + integrations + herdr.service
-#   sudo ./herdr.sh update         # herdr update + tode --upgrade (server restarted only when idle-safe: --restart)
-#   sudo ./herdr.sh creds          # copy the agent's claude / codex / grok / gh logins into /home/hermes
+#   sudo ./herdr.sh update         # herdr update + tode --upgrade (server restarted only when idle-safe: --restart);
+#                                  # previous binary kept, restored automatically if the new one does not start
+#   sudo ./herdr.sh rollback       # back to the binary that ran before the last update
+#   sudo ./herdr.sh creds          # copy the agent's grok / gh logins into /home/hermes
 #   sudo ./herdr.sh login <claude|codex|grok|gh>   # or log in separately as hermes
 #   sudo ./herdr.sh status | logs | restart | remove
 set -euo pipefail
@@ -32,6 +34,9 @@ TODE_PLUGIN=zenbu-labs/terminal-code/herdr-plugin
 TODE_PLUGIN_ID=zenbu-labs.tode
 INTEGRATIONS=(claude codex grok)
 CRED_FILES=(.claude/.credentials.json .codex/auth.json .grok/auth.json .config/gh/hosts.yml)
+# Claude and Codex OAuth rotate a single-use refresh token: a copied login and its original
+# refresh independently and one of them gets revoked. Only static tokens are copied (orca.sh: same).
+COPY_CRED_FILES=(.grok/auth.json .config/gh/hosts.yml)
 AGENT_HOME="$HERMES_DATA_DIR/home"
 
 id "$OP_USER" >/dev/null 2>&1 || die "user $OP_USER does not exist (harden.sh creates it)"
@@ -124,7 +129,7 @@ EOF
 # writes $AGENT_HOME, and a config planted there must not run as this sudoer.
 sync_creds() {
   local f src dst n=0 missing=() force="${1:-}"
-  for f in "${CRED_FILES[@]}"; do
+  for f in "${COPY_CRED_FILES[@]}"; do
     src="$AGENT_HOME/$f"; dst="$OP_HOME/$f"
     if [ -f "$dst" ] && [ "$force" != --force ]; then continue; fi
     if [ -f "$src" ] && [ ! -L "$src" ]; then
@@ -136,6 +141,9 @@ sync_creds() {
   done
   local d; for d in .claude .codex .grok .config/gh; do [ ! -d "$OP_HOME/$d" ] || chown "$OP_USER:$OP_USER" "$OP_HOME/$d"; done
   info "  copied $n login file(s) from the agent into $OP_HOME${missing[*]:+ (absent on the agent: ${missing[*]})}"
+  for f in .claude/.credentials.json .codex/auth.json; do
+    [ -f "$OP_HOME/$f" ] || info "  ${f%%/*}: not copied (rotating OAuth) — own login: sudo $0 login $(basename "${f%%/*}" | tr -d .)"
+  done
 }
 
 install_plugin() {
@@ -211,13 +219,29 @@ do_update() {
   installed || die "herdr is not installed: sudo $0 install"
   local before after
   before="$(hd --version | awk '{print $2}')"
+  cp -p "$HERDR_BIN" "$HERDR_BIN.previous"
   hd update >/dev/null 2>&1 || warn "herdr update failed"
+  if ! hd --version >/dev/null 2>&1; then
+    mv -f "$HERDR_BIN.previous" "$HERDR_BIN"
+    warn "the new herdr binary does not start → herdr $before restored"
+    notify "herdr.sh: the herdr update produced a binary that does not start — herdr $before restored"
+  fi
   after="$(hd --version | awk '{print $2}')"
   info "herdr $before → $after"
   as_op sh -c 'command -v tode >/dev/null && tode --upgrade' >/dev/null 2>&1 || warn "tode --upgrade failed (plugin: herdr plugin install $TODE_PLUGIN --yes)"
   # The running server keeps its version (herdr's own policy); restart only on request — it ends every pane.
   if [ "$before" != "$after" ] && [ "${1:-}" = --restart ]; then systemctl restart herdr; info "herdr.service restarted"
   elif [ "$before" != "$after" ]; then info "server still on $before until: sudo $0 restart (ends running panes)"; fi
+}
+
+# Back to the binary that ran before the last update (kept by do_update); the server switches at its next restart.
+do_rollback() {
+  [ -x "$HERDR_BIN.previous" ] || die "no previous herdr binary kept ($HERDR_BIN.previous)"
+  local cur; cur="$(hd --version 2>/dev/null | awk '{print $2}')"
+  cp -p "$HERDR_BIN" "$HERDR_BIN.rollback" 2>/dev/null || true
+  mv -f "$HERDR_BIN.previous" "$HERDR_BIN"
+  mv -f "$HERDR_BIN.rollback" "$HERDR_BIN.previous" 2>/dev/null || true
+  info "herdr ${cur:-?} → $(hd --version | awk '{print $2}') (running server: sudo $0 restart, ends running panes)"
 }
 
 do_login() {
@@ -253,11 +277,12 @@ do_remove() {
 case "${1:-}" in
   install) do_install ;;
   update)  do_update "${2:-}" ;;
+  rollback) do_rollback ;;
   creds)   sync_creds --force ;;
   login)   do_login "${2:-}" ;;
   status)  do_status ;;
   logs)    journalctl -u herdr -f -o cat ;;
   restart) systemctl restart herdr; info "herdr.service restarted (panes restored from the saved layout)" ;;
   remove)  do_remove ;;
-  *) die "usage: $0 install | update [--restart] | creds | login <claude|codex|grok|gh> | status | logs | restart | remove" ;;
+  *) die "usage: $0 install | update [--restart] | rollback | creds | login <claude|codex|grok|gh> | status | logs | restart | remove" ;;
 esac

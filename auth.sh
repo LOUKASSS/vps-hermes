@@ -27,7 +27,8 @@ do_hermes() {
 do_claude() {
   local envf
   info "Claude Code login with your Claude subscription. Open the printed URL on your laptop, paste the code back."
-  info "Credentials land in /opt/data/home/.claude/.credentials.json."
+  info "Credentials land in /opt/data/home/.claude/.credentials.json. Its refresh token rotates: never copy that"
+  info "file to another HOME (Orca / herdr log in on their own). Sturdier for Hermes: $0 claude-token."
   agent_exec env CLAUDE_CONFIG_DIR=/opt/data/home/.claude claude auth login
   envf="$HERMES_DATA_DIR/.env"
   no_symlink "$envf"
@@ -42,7 +43,8 @@ do_claude() {
 
 do_claude_token() {
   local envf tok
-  info "Alternative: long-lived token via 'claude setup-token' (Claude Max). Open the URL on your laptop, approve, paste the code back."
+  info "Recommended for Hermes: long-lived token (1 year) via 'claude setup-token' — nothing to refresh, so no"
+  info "rotation to lose. Open the URL on your laptop, approve, paste the code back."
   agent_exec claude setup-token
   echo
   read -r -s -p "Paste the token here to store it as CLAUDE_CODE_OAUTH_TOKEN for Hermes (Enter to skip): " tok; echo
@@ -100,7 +102,11 @@ do_status() {
     echo "── hermes-agent is NOT running (logins not shown): docker compose ps ──"
   else agent_run sh -c '
     echo "── hermes providers ──"; hermes auth list 2>&1 || true; hermes config get model 2>&1 || true
-    echo; echo "── claude ──"; CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status --text 2>&1 || echo "not logged in"
+    echo; echo "── claude ──"
+    # What the DirectSDK provider uses: a setup-token in /opt/data/.env wins over the credential file.
+    if grep -q "^CLAUDE_CODE_OAUTH_TOKEN=." /opt/data/.env 2>/dev/null; then echo "Hermes uses: CLAUDE_CODE_OAUTH_TOKEN (setup-token, no refresh)"
+    else echo "Hermes uses: $HOME/.claude/.credentials.json (rotating refresh token — auth.sh claude-token is sturdier)"; fi
+    CLAUDE_CONFIG_DIR="$HOME/.claude" claude auth status --text 2>&1 || echo "not logged in"
     echo; echo "── codex ──"; codex login status 2>&1 || echo "not logged in"
     echo; echo "── grok ──"; [ -f "$HOME/.grok/auth.json" ] && echo "auth.json present" || echo "not logged in"
     echo; echo "── gh ──"; gh auth status 2>&1 || true
@@ -110,7 +116,7 @@ do_status() {
   fi
   echo; echo "── updates ──"
   if [ -e "$UPDATE_HOLD" ]; then echo "ON HOLD since $(cat "$UPDATE_HOLD") (after a rollback) — sudo $STACK_DIR/update.sh resume"
-  elif systemctl is-enabled -q hermes-update.timer 2>/dev/null; then echo "automatic (Sunday 03:30)"
+  elif systemctl is-enabled -q hermes-update.timer 2>/dev/null; then echo "automatic (every night, 04:00)$([ -s "$STACK_DIR/state/last-update" ] && echo " — last: $(cat "$STACK_DIR/state/last-update")")"
   else echo "timer disabled (sudo systemctl enable --now hermes-update.timer)"; fi
   [ -e "$MAINTENANCE_FLAG" ] && echo "heal.sh PAUSED ($MAINTENANCE_FLAG exists)"
   echo; echo "── backups ──"
@@ -225,8 +231,8 @@ menu() {
 Hermes stack — auth
 
   1) hermes        Hermes model provider (Claude Max / ChatGPT-Codex / SuperGrok OAuth)
-  2) claude        Claude Code CLI   (claude auth login — subscription)
-  3) claude-token  Claude Code CLI   (claude setup-token → CLAUDE_CODE_OAUTH_TOKEN)
+  2) claude        Claude Code CLI   (claude auth login — subscription, rotating refresh token)
+  3) claude-token  Claude Code CLI   (claude setup-token → CLAUDE_CODE_OAUTH_TOKEN, 1 year — recommended)
   4) codex         Codex CLI         (codex login --device-auth)
   5) grok          Grok CLI          (grok login --device-auth)
   6) gh            GitHub CLI        (gh auth login --web + git identity)
