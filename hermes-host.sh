@@ -134,7 +134,15 @@ do_build() {
   install_deps
   sha="$(resolve_ref "${1:-$HERMES_REF}")"; short="${sha:0:12}"; rel="$HERMES_RELEASES/$short"; app="$rel/app"
   BUILT_SHORT="$short"
-  if [ "$(release_sha "$short")" = "$sha" ]; then info "release $short already built"; return 0; fi
+  if [ "$(release_sha "$short")" = "$sha" ]; then
+    # Reused only if built with today's HERMES_FEATURES (.features); the active release is never rebuilt.
+    if [ "$(cat "$rel/.features" 2>/dev/null)" = "${HERMES_FEATURES:-}" ]; then info "release $short already built"; return 0; fi
+    if [ "$short" = "$(current_release)" ]; then
+      warn "release $short is active and was built without HERMES_FEATURES=${HERMES_FEATURES:-} — they apply to the next commit"
+      return 0
+    fi
+    info "release $short was built with other features (${HERMES_FEATURES:-none} wanted) — rebuilding"
+  fi
   install -d -m 755 "$HERMES_RELEASES"
   drop_release "$short"; rm -rf "${rel:?}.failed"   # a leftover without .release = interrupted build
   install -d -m 755 -o "$OP_USER" -g "$HERMES_GID" "$rel"
@@ -161,6 +169,13 @@ do_build() {
   # read from the release's own Dockerfile — so the release is complete and sealed like the image.
   mapfile -t extras < <(grep -oE -- '--extra [A-Za-z0-9_-]+' "$app/Dockerfile" 2>/dev/null | awk '{print $2}' | sort -u)
   [ "${#extras[@]}" -gt 0 ] || extras=(all messaging otlp anthropic bedrock azure-identity matrix google-chat)
+  # + the opt-in features this install uses (HERMES_FEATURES in .env, comma-separated, e.g.
+  # honcho,fal): with lazy installs off, a feature missing from the release is missing at run time
+  # (memory.provider honcho…).
+  local IFS_OLD="$IFS"; IFS=','
+  # shellcheck disable=SC2206  # split on commas only
+  extras+=(${HERMES_FEATURES:-})
+  IFS="$IFS_OLD"
   for e in "${extras[@]}"; do extra_args+=(--extra "$e"); done
   info "pm install ${extras[*]}"
   # CC/CXX as in the Dockerfile: native extras build from source with gcc (no clang on the host).
@@ -176,6 +191,7 @@ do_build() {
     rm -rf "${rel:?}.failed"; mv "$rel" "$rel.failed"   # kept for a look (its environment stays until the next build of $short)
     die "release $short fails its smoke test — kept as $rel.failed"
   fi
+  echo "${HERMES_FEATURES:-}" > "$rel/.features"
   echo "$sha" > "$rel/.release"   # written last: marks a complete release
   info "release $short built"
 }
