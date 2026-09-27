@@ -231,7 +231,7 @@ exec(compile(code, "<hermes_py>", "exec"))' "$app" "$code" "$@"
   fi
 }
 
-# agent_wrapper_init — for bin/hermes and bin/omh, run by the operator without the stack .env
+# agent_wrapper_init — for bin/hermes, run by the operator without the stack .env
 # (root-only): the workspace comes from agent.env; AGENT_CWD = the current directory when it is
 # inside the workspace, else the workspace root.
 agent_wrapper_init() {
