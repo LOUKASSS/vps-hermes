@@ -116,7 +116,8 @@ what `projects/helios` contains — review the diff before deploying.
 - installs the plugin `zenbu-labs/terminal-code/herdr-plugin` (builds `tode` into `~/.local/lib/tode`)
   and the herdr integrations for `claude`, `codex`, `grok` (session restore);
 - runs `herdr server` as **`herdr.service`** (`User=hermes`, `HOME=/home/hermes`, `MemoryMax=HERDR_MEM_LIMIT`):
-  panes survive SSH disconnects and client detaches, and come back after a reboot;
+  panes survive SSH disconnects and client detaches, and come back after a reboot; at the memory
+  limit only the biggest pane process is OOM-killed (`OOMPolicy=continue`), the server and other panes stay up;
 - copies the agent's grok / gh login files into `/home/hermes` when absent (`herdr.sh creds` to
   refresh); Claude and Codex need `herdr.sh login claude|codex` (rotating refresh tokens) and adds a `~/.bashrc` block
   (`PATH`, `$WORKSPACE`, `ws`, SSH logins land in the workspace).
