@@ -86,7 +86,7 @@ fi
 
 # One folder per project under /srv, owned by the operator:
 #   /srv/command-center  this repo (scripts, compose, .env)   /srv/hermes   agent data (install.sh)
-#   /srv/orca            Orca HOME (orca.sh)                   /srv/helios   Helios deployment (helios.sh)
+#   /home/hermes         operator + Orca HOME (orca.sh)        /srv/helios   Helios deployment (helios.sh)
 #   /srv/workspace       shared projects (install.sh)
 CC_DIR=/srv/command-center
 for d in /srv/hermes /srv/helios /srv/workspace; do install -d -m 755 -o "$OP_USER" -g "$OP_USER" "$d"; done
@@ -101,7 +101,7 @@ if [ "$(cd -P "$STACK_DIR" && pwd -P)" != "$CC_DIR" ]; then
     [ -f "$STACK_DIR/.env" ] && [ ! -f "$CC_DIR/.env" ] && cp "$STACK_DIR/.env" "$CC_DIR/.env"
   fi
 fi
-# Only the checkout: data dirs are chowned by install.sh (HERMES_UID) and orca.sh owns /srv/orca —
+# Only the checkout: data dirs are chowned by install.sh (HERMES_UID) —
 # a blanket chown -R here would hand them to the operator on every re-run.
 if [ -d "$CC_DIR" ]; then
   chown -R "$OP_USER:$OP_USER" "$CC_DIR"

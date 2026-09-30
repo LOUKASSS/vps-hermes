@@ -4,7 +4,7 @@
 #   /srv/command-center   this repo (scripts, compose, .env)       ← you are here
 #   /srv/hermes           Hermes agent data (data/ = /opt/data, obsidian/, postgres/)
 #   /opt/hermes           Hermes code (active release; hermes-host.sh, systemd hermes-gateway / hermes-dashboard)
-#   /srv/orca             Orca HOME (orca.service, on the host)
+#   /home/hermes          Orca HOME = operator HOME (orca.service, herdr, SSH)
 #   /srv/helios           Helios deployment (.env, tinyauth state); code in the workspace
 #   /srv/discord-backup   Discord backup bot (releases, bws.env, sealed archives)
 #   /srv/workspace        shared projects — Hermes, Orca, herdr and SSH, all on the host
@@ -61,7 +61,7 @@ do_status() {
   echo; echo "── orca (host) ──"
   if [ -e /opt/orca/current ]; then
     line "service" "$(svc_state orca) · $(cat /opt/orca/current/VERSION 2>/dev/null) · HOME=$(sed -n 's/^HOME=//p' /etc/orca.env 2>/dev/null) · cwd $(systemctl show orca -p WorkingDirectory --value 2>/dev/null)"
-    [ "$(sed -n 's/^HOME=//p' /etc/orca.env 2>/dev/null)" = "$ORCA_HOME" ] || echo "  /etc/orca.env HOME differs from ORCA_HOME=$ORCA_HOME — sudo command-center migrate finalize"
+    [ "$(sed -n 's/^HOME=//p' /etc/orca.env 2>/dev/null)" = "$ORCA_HOME" ] || echo "  /etc/orca.env HOME differs from ORCA_HOME=$ORCA_HOME — sudo ./orca.sh write-service && sudo systemctl restart orca"
   else line "service" "not installed (command-center deploy orca)"; fi
 
   echo; echo "── helios ──"

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Orca remote server (https://www.onorca.dev/docs/remote-servers) installed ON THE HOST, not in a
 # container: `orca serve` runs as user `hermes` (the harden.sh operator, systemd orca.service,
-# docker group + passwordless sudo via /etc/sudoers.d/90-hermes) with HOME=ORCA_HOME (default
-# /srv/orca, 0700). That HOME is NOT /home/hermes and is NOT mounted in the agent container:
-# the container writes /srv/hermes/data/home as uid hermes, and a dotfile planted there
-# (~/.claude/settings.json hooks, ~/.gitconfig core.hooksPath, ~/.codex/config.toml MCP commands)
-# would run as a sudoer the next time an Orca session touched it. Only the credential FILES of the
-# agent's grok / gh logins are copied over (`orca.sh creds`); config files never are. Claude and
-# Codex need their own login here (`orca.sh login claude|codex`): see sync_creds. Sessions cwd is HERMES_WORKSPACE_DIR (/srv/workspace, same path inside the agent). Repo
-# hooks in that tree are overridden by GIT_CONFIG_COUNT (git -c rank); treat the workspace as untrusted
-# for sudo (Makefiles / deploy.sh = accepted residual risk). No dedicated `orca` user.
+# docker group + passwordless sudo via /etc/sudoers.d/90-hermes) with HOME=ORCA_HOME, the operator
+# HOME (default /home/hermes): Orca, herdr and SSH shells share one set of logins, plugins, skills
+# and session history. That HOME is NOT the agent's: the container writes /srv/hermes/data/home as
+# uid hermes, and a dotfile planted there (~/.claude/settings.json hooks, ~/.gitconfig
+# core.hooksPath, ~/.codex/config.toml MCP commands) would run as a sudoer the next time a session
+# touched it. Only the credential FILES of the agent's grok / gh logins are copied over
+# (`orca.sh creds`); config files never are. Claude and Codex keep their own login here
+# (`orca.sh login claude|codex`): see sync_creds. Sessions cwd is HERMES_WORKSPACE_DIR
+# (/srv/workspace, same path inside the agent). Repo hooks in that tree are overridden for Orca
+# sessions by GIT_CONFIG_COUNT (git -c rank, /etc/orca.env only: herdr / SSH keep repo hooks such
+# as lefthook); treat the workspace as untrusted for sudo (Makefiles / deploy.sh = accepted
+# residual risk). No dedicated `orca` user.
 #
 #   sudo ./orca.sh install            # hermes HOME, deps (Xvfb + Electron libs, Node 22, claude/codex/grok/gh), Orca, service, creds
 #   sudo ./orca.sh update [--force]   # CLIs (rolled back if one no longer starts) + new release? download,
@@ -25,7 +28,7 @@
 #
 # Layout: /opt/orca/<tag>/ (extracted AppImage) · /opt/orca/current, /opt/orca/previous (symlinks)
 #         /usr/local/bin/orca · /etc/orca.env (HOME + GIT_CONFIG_COUNT) · /etc/systemd/system/orca.service
-#         ORCA_HOME/ (0700 hermes: .config/orca state, logins, git-hooks/ empty)
+#         ORCA_HOME/ (the operator HOME: .config/orca state, logins) · /opt/orca/git-hooks (empty, root)
 #         sessions cwd: HERMES_WORKSPACE_DIR (not ORCA_HOME/work)
 set -euo pipefail
 
@@ -33,13 +36,14 @@ set -euo pipefail
 . "$(dirname "$0")/lib/common.sh"
 need_root
 load_env
-: "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}" "${ORCA_HOME:=/srv/orca}"
+: "${ORCA_PORT:=6768}" "${ORCA_MEM_LIMIT:=3g}"
 
 ORCA_USER=hermes
 # Sessions start in the shared workspace (lib/common.sh default /srv/workspace).
 ORCA_WORKDIR="$HERMES_WORKSPACE_DIR"
-ORCA_HOOKS="$ORCA_HOME/git-hooks"
 ORCA_ROOT=/opt/orca
+# Empty and root-owned: a session cannot plant a hook there. Only /etc/orca.env points git at it.
+ORCA_HOOKS="$ORCA_ROOT/git-hooks"
 ORCA_ENV=/etc/orca.env
 ORCA_UNIT=/etc/systemd/system/orca.service
 AGENT_HOME="$HERMES_DATA_DIR/home"
@@ -71,20 +75,20 @@ EOF
 }
 
 # ── user ─────────────────────────────────────────────────────────────────
-# Existing harden.sh user (do not useradd). HOME is ORCA_HOME, 0700, not /home/hermes.
+# Existing harden.sh user (do not useradd). HOME is ORCA_HOME, its login HOME (left as is).
 # hermes already has docker + /etc/sudoers.d/90-hermes — no 91-orca fragment.
 ensure_user() {
   id "$ORCA_USER" >/dev/null 2>&1 || die "user $ORCA_USER does not exist (harden.sh creates hermes)"
+  [ -d "$ORCA_HOME" ] || die "ORCA_HOME $ORCA_HOME does not exist (the login HOME of $ORCA_USER)"
   usermod -aG docker "$ORCA_USER"
-  install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME"
-  install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOOKS"
+  install -d -m 0755 -o root -g root "$ORCA_HOOKS"
   install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_WORKDIR"
   ensure_gitconfig
 }
 
-# File-level defense in depth (env GIT_CONFIG_COUNT still wins over .git/config).
+# safe.directory only: core.hooksPath stays in /etc/orca.env (Orca sessions), not in the shared
+# ~/.gitconfig, so herdr / SSH shells keep running repo hooks.
 ensure_gitconfig() {
-  as_hermes git config --global core.hooksPath "$ORCA_HOOKS"
   local d
   for d in "$ORCA_WORKDIR" "$STACK_DIR" "$HELIOS_SRC"; do
     as_hermes git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$d" \
@@ -274,8 +278,8 @@ write_service() {
     ""|0.0.0.0|"::"|127.0.0.1) warn "DESKTOP_BIND=${DESKTOP_BIND:-unset}: Orca will advertise that address to its clients. Set it to the Tailscale IP (install.sh does when Tailscale is up)." ;;
   esac
   [ -d "$ORCA_WORKDIR" ] || die "WorkingDirectory $ORCA_WORKDIR does not exist (sudo $STACK_DIR/install.sh creates the workspace)"
-  install -d -m 0700 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOME"
-  install -d -m 0755 -o "$ORCA_USER" -g "$ORCA_USER" "$ORCA_HOOKS"
+  [ -d "$ORCA_HOME" ] || die "ORCA_HOME $ORCA_HOME does not exist"
+  install -d -m 0755 -o root -g root "$ORCA_HOOKS"
   cat > "$ORCA_ENV" <<EOF
 # Generated by orca.sh from $STACK_DIR/.env — re-run \`orca.sh pair\` / \`orca.sh update --force\` after editing .env.
 HOME=$ORCA_HOME

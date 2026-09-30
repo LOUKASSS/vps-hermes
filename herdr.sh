@@ -8,8 +8,8 @@
 #
 # Panes start in the shared workspace (/srv/workspace — the same path the Hermes agent and Orca
 # use), herdr worktrees go to /srv/workspace/worktrees/herdr. HOME is the login HOME of `hermes`
-# (/home/hermes), separate from the agent's (/srv/hermes/data/home) and Orca's (/srv/orca): only
-# grok / gh credential FILES are copied between them (`herdr.sh creds`), never config files — same
+# (/home/hermes, shared with Orca), separate from the agent's (/srv/hermes/data/home): only
+# grok / gh credential FILES are copied from the agent (`herdr.sh creds`), never config files — same
 # rule as orca.sh. Claude and Codex rotate their refresh token: own login (`herdr.sh login`).
 #
 #   sudo ./herdr.sh install        # herdr + config + terminal-code plugin (tode) + integrations + herdr.service
