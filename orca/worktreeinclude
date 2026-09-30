@@ -1,0 +1,5 @@
+# Gitignored files copied from the main checkout into each new Orca worktree (literal paths only).
+# Source: LOUKASSS/command-center orca/worktreeinclude.
+.env
+.env.local
+.dev.vars

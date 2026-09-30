@@ -19,6 +19,8 @@
 #   sudo ./orca.sh creds              # re-copy the agent's grok / gh login files into ORCA_HOME (after auth.sh)
 #   sudo ./orca.sh share              # no-op (same uid as the stack; no POSIX ACLs)
 #   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as hermes in ORCA_HOME (separate from the agent)
+#   sudo ./orca.sh skills             # (re)install the Orca skills for claude/codex/grok/hermes (install + each new release)
+#   sudo ./orca.sh repos              # register every git repo of HERMES_WORKSPACE_DIR/projects (setup = each repo's orca.yaml)
 #   sudo ./orca.sh status | logs | remove
 #
 # Layout: /opt/orca/<tag>/ (extracted AppImage) · /opt/orca/current, /opt/orca/previous (symlinks)
@@ -204,6 +206,21 @@ update_clis() {
   return 1
 }
 
+# ── Orca skills (orca skills install = npx skills add stablyai/orca --global) ──
+# `skills add` pulls stablyai/orca's default branch (not the release tag): re-synced once a new
+# release is up, so the guides track the CLI the service runs. Explicit targets: autodetection would
+# follow whatever agent dirs happen to exist in ORCA_HOME. Bounded: it runs in the nightly update.
+ORCA_SKILLS=(orca-cli orchestration computer-use)
+ORCA_SKILL_AGENTS=claude-code,codex,grok,hermes-agent,universal
+sync_skills() {
+  local -a args=()
+  local s
+  for s in "${ORCA_SKILLS[@]}"; do args+=(--skill "$s"); done
+  info "Orca skills (${ORCA_SKILLS[*]}) → $ORCA_SKILL_AGENTS…"
+  (cd "$ORCA_HOME" && as_hermes timeout 300 orca skills install "${args[@]}" --agent "$ORCA_SKILL_AGENTS" >/dev/null) \
+    || { warn "orca skills install failed (retry: sudo $0 skills)"; return 1; }
+}
+
 # ── release download: verify sha512 from the electron-builder manifest, extract (no FUSE) ──
 # fetch_release <tag|latest> → sets FETCHED_TAG (downloads only if that tag is not there yet)
 fetch_release() {
@@ -333,6 +350,7 @@ do_install() {
   fetch_release "${ORCA_VERSION:-latest}"
   activate "$FETCHED_TAG"
   sync_creds
+  sync_skills || true
   write_service
   systemctl enable -q orca
   if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -372,7 +390,9 @@ do_update() {
     warn "Orca $FETCHED_TAG does not come up → back to $cur"
     notify "orca.sh: Orca $FETCHED_TAG did not start — rolled back to $cur, Orca updates on hold (sudo $0 update --force)"
     do_rollback
+    return
   fi
+  sync_skills || notify "orca.sh: Orca skills not refreshed for $FETCHED_TAG (sudo $0 skills)"
 }
 
 do_rollback() {
@@ -382,6 +402,7 @@ do_rollback() {
   date -Is > "$ORCA_ROOT/.hold"   # the nightly update.sh → orca.sh update must not re-activate $cur
   info "Orca: $(basename "$cur") → $(basename "$prev") — updates on hold until: sudo $0 update --force"
   restart_and_pair
+  sync_skills || true
 }
 
 do_pair() {
@@ -416,11 +437,44 @@ do_status() {
     echo "listening: $(ss -ltnH "sport = :$ORCA_PORT" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')  advertised: ${DESKTOP_BIND:-?}:$ORCA_PORT  pairing: $([ -n "${ORCA_PAIRING:-}" ] && echo mobile || echo desktop)"
     echo "input rules: $(/usr/sbin/iptables -S INPUT 2>/dev/null | grep -c -- "--dport $ORCA_PORT " || echo 0)/3 (tailscale0 + lo accept, else drop)  ufw: $(ufw status 2>/dev/null | sed -n 's/^Status: //p' || echo n/a)"
     echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR · git-hooks $ORCA_HOOKS"
+    echo "skills: $(cd "$ORCA_HOME" && for s in "${ORCA_SKILLS[@]}"; do [ -f ".agents/skills/$s/SKILL.md" ] && printf '%s ' "$s" || printf '%s(missing) ' "$s"; done)"
     local f; for f in "${CRED_FILES[@]}"; do [ -f "$ORCA_HOME/$f" ] && echo "  login: $f" || echo "  no login: $f"; done
     echo "stack $STACK_DIR: same uid $ORCA_USER (no ACL share)"
   else
     echo "not installed (sudo $0 install)"
   fi
+}
+
+# repos — register every git checkout in $ORCA_WORKDIR/projects with the runtime (idempotent).
+# Worktree setup (npm ci, .env copies) comes from each repo's own orca.yaml.
+# Sites with a dev branch integrate there (dev = preprod, main = prod): a repo without a base ref
+# gets origin/dev, so new worktrees branch off dev. A base ref chosen in the app is left alone.
+do_repos() {
+  systemctl is-active -q orca || die "orca.service is not running"
+  local known d base n=0 failed=0
+  known="$(cd "$ORCA_HOME" && as_hermes orca repo list --json | python3 -c 'import json, sys
+for r in json.load(sys.stdin)["result"]["repos"]: print(r.get("path", "") + "\t" + (r.get("worktreeBaseRef") or ""))')" \
+    || die "orca repo list failed"
+  for d in "$ORCA_WORKDIR"/projects/*/; do
+    d="${d%/}"
+    [ -d "$d/.git" ] || continue
+    if grep -q "^$d"$'\t' <<<"$known"; then
+      base="$(grep "^$d"$'\t' <<<"$known" | cut -f2)"
+    elif (cd "$ORCA_HOME" && as_hermes orca repo add --path "$d" >/dev/null); then
+      info "  + $(basename "$d")"; n=$((n + 1)); base=""
+    else
+      warn "  orca repo add $d failed"; failed=$((failed + 1)); continue
+    fi
+    [ -z "$base" ] || continue
+    git -C "$d" rev-parse -q --verify refs/remotes/origin/dev >/dev/null || continue
+    if (cd "$ORCA_HOME" && as_hermes orca repo set-base-ref --repo "path:$d" --ref origin/dev >/dev/null); then
+      info "  $(basename "$d"): base ref origin/dev"
+    else
+      warn "  $(basename "$d"): set-base-ref origin/dev failed"; failed=$((failed + 1))
+    fi
+  done
+  info "Orca: $n repo(s) added, $(grep -c . <<<"$known") already known$([ "$failed" -eq 0 ] || echo ", $failed failure(s)")"
+  [ "$failed" -eq 0 ]
 }
 
 do_remove() {
@@ -441,9 +495,11 @@ case "${1:-}" in
   # Rewrite /etc/orca.env + orca.service from .env WITHOUT restarting (running sessions keep going;
   # the new HOME / WorkingDirectory apply at the next restart). Used by migrate-srv-layout.sh.
   write-service) [ -e "$ORCA_UNIT" ] || die "Orca is not installed"; write_service; info "orca.service rewritten (applies at next restart)" ;;
+  skills)   sync_skills ;;
+  repos)    do_repos ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
   remove)   do_remove ;;
-  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | login <claude|codex|grok|gh> | status | logs | remove" ;;
+  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | skills | repos | login <claude|codex|grok|gh> | status | logs | remove" ;;
 esac

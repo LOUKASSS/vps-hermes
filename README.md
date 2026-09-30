@@ -459,8 +459,24 @@ sudo ./orca.sh install         # hermes HOME, Xvfb + Electron libs, Node 22, cla
 sudo ./orca.sh pair mobile     # phone: scan the printed QR (phone on the tailnet); `pair desktop` = runtime link
 sudo ./orca.sh creds           # re-copy the agent's grok / gh logins after `auth.sh grok|gh`
 sudo ./orca.sh login claude    # Orca's own login (required for claude|codex, optional for grok|gh)
+sudo ./orca.sh skills          # (re)install the Orca skills (also run by install and on every new release)
+sudo ./orca.sh repos           # register every git repo of /srv/workspace/projects (idempotent)
 sudo ./orca.sh status | logs
 ```
+
+**Skills.** `orca-cli`, `orchestration` and `computer-use` are installed globally in `ORCA_HOME`
+for Claude Code, Codex, Grok, Hermes and the shared `.agents/skills` (`orca skills install
+--agent claude-code,codex,grok,hermes-agent,universal`). They document the CLI of one Orca
+release, so `orca.sh update` re-syncs them whenever it activates a new release.
+
+**Workspace setup.** `orca.sh repos` adds each checkout to the runtime; repos with an
+`origin/dev` branch get it as base ref (new worktrees branch off dev, not prod). What a new
+worktree runs comes from the repo's own `orca.yaml`, read **from the new worktree** — so from its
+base branch. Every npm repo carries [`orca/orca.yaml.npm`](orca/orca.yaml.npm) (`npm ci`, agents
+wait for it) and [`orca/worktreeinclude`](orca/worktreeinclude) as `.worktreeinclude` (copies
+`.env` / `.dev.vars` from the main checkout when they exist); astro-template syncs both to the
+sites (`kit/sync/managed.json`). The desktop app asks once per repo to trust a new or changed
+`orca.yaml`; `npm ci` runs package install scripts as `hermes` (same residual risk as Makefiles).
 
 **Editing this stack from Orca.** Open `/srv/command-center` as a project: sessions can change it
 in place and run `sudo ./install.sh`, `sudo ./auth.sh …`, `docker compose …`. Same uid, no ACLs.
