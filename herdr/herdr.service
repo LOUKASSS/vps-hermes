@@ -25,6 +25,9 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=30
 MemoryMax=@MEM@
+# At MemoryMax the kernel kills the biggest pane process (usually a build). The default
+# OOMPolicy=stop would then stop the whole unit and take every pane down with it.
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target
