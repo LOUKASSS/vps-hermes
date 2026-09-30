@@ -6,7 +6,7 @@
 #   /srv/command-center   this repo: scripts, compose, .env, state/traefik (STACK_DIR)
 #   /srv/hermes           Hermes agent: data/ (/opt/data → it), obsidian/, postgres/
 #   /opt/hermes           Hermes code: → /opt/hermes-releases/<sha12> (hermes-host.sh, systemd units)
-#   /srv/orca             Orca HOME (orca.service)
+#   /home/hermes          Orca HOME = the operator HOME (orca.service, herdr, SSH)
 #   /srv/helios           Helios deployment: .env, tinyauth/ (code: WORKSPACE/projects/helios)
 #   /srv/discord-backup   Discord backup bot: app/ releases, bws.env, var/ archives (discord-backup.sh)
 #   /srv/workspace        shared projects — every tool (Hermes, Orca, herdr, SSH) on the host
@@ -64,13 +64,15 @@ load_env() {
   : "${HERMES_UID:=1000}" "${HERMES_GID:=1000}"
   # Defaults = the /srv layout above (migrate-srv-layout.sh writes them into a live .env).
   : "${HERMES_DATA_DIR:=$SRV_ROOT/hermes/data}" "${HERMES_WORKSPACE_DIR:=$SRV_ROOT/workspace}" "${TRAEFIK_DIR:=$STACK_DIR/state/traefik}"
-  : "${OBSIDIAN_DIR:=$SRV_ROOT/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}" "${ORCA_HOME:=$SRV_ROOT/orca}"
+  : "${OBSIDIAN_DIR:=$SRV_ROOT/hermes/obsidian}" "${OBSIDIAN_VAULT_DIR:=vault}"
   : "${POSTGRES_DIR:=$SRV_ROOT/hermes/postgres}" "${POSTGRES_USER:=hermes}" "${POSTGRES_DB:=hermes}"
   : "${HELIOS_DIR:=$SRV_ROOT/helios}" "${HELIOS_SRC:=$HERMES_WORKSPACE_DIR/projects/helios}"
   : "${DISCORD_BACKUP_DIR:=$SRV_ROOT/discord-backup}"
   : "${HERMES_CONFIG_DIR:=$HERMES_WORKSPACE_DIR/projects/hermes-config}" "${HERMES_CONFIG_REPO:=https://github.com/LOUKASSS/hermes-config.git}"
   : "${OP_USER:=hermes}" "${OP_HOME:=$(getent passwd "${OP_USER}" 2>/dev/null | cut -d: -f6)}"
   : "${OP_HOME:=/home/$OP_USER}"
+  # Orca shares the operator HOME (logins, plugins, skills, session history with herdr / SSH).
+  : "${ORCA_HOME:=$OP_HOME}"
   : "${RESTIC_IMAGE:=restic/restic:latest}"
   [ -n "${RESTIC_REPOSITORY:-}" ] || RESTIC_REPOSITORY="b2:${B2_BUCKET:-}:hermes"
   export RESTIC_REPOSITORY RESTIC_IMAGE RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" B2_ACCOUNT_ID="${B2_ACCOUNT_ID:-}" B2_ACCOUNT_KEY="${B2_ACCOUNT_KEY:-}"
@@ -346,7 +348,7 @@ restic_run() {
   # stdout, so a caller capturing stderr ($(… 2>&1 >/dev/null)) would get nothing.
   [ -t 0 ] && [ -t 1 ] && tty=(-it)
   if [ "${1:-}" = --rw ]; then rw=(-v "$2:/restore"); shift 2; fi
-  [ -d "$ORCA_HOME" ] && orca=(-v "$ORCA_HOME:$ORCA_HOME:ro")   # Orca state + logins, when orca.sh installed it
+  [ -d "$ORCA_HOME/.config/orca" ] && orca=(-v "$ORCA_HOME/.config/orca:$ORCA_HOME/.config/orca:ro")   # Orca state + pairings
   [ -d "$HELIOS_DIR" ] && helios=(-v "$HELIOS_DIR:$HELIOS_DIR:ro")   # Helios .env + tinyauth state
   [ -d "$DISCORD_BACKUP_DIR/var" ] && discord=(-v "$DISCORD_BACKUP_DIR/var:$DISCORD_BACKUP_DIR/var:ro")   # sealed Discord archives + bot state
   docker run --rm "${tty[@]}" "${rw[@]}" --name "hermes-restic-$$" --hostname hermes-vps \

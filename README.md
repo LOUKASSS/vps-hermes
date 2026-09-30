@@ -21,7 +21,6 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
 │   ├── data/     → /opt/data   agent HOME: config, sessions, credentials, skills, private/, mcp/
 │   ├── postgres/               data/ (live cluster) + dumps/ (daily pg_dumpall)
 │   └── obsidian/               Obsidian Sync sidecar HOME
-├── orca/                   Orca HOME (0700)
 ├── helios/                 Helios deployment: .env (secrets), tinyauth/data
 └── workspace/  → /srv/workspace (every tool; /workspace = alias)
     ├── projects/<repo>/        one git repo per tool / project, one herdr workspace each:
@@ -39,7 +38,7 @@ One VPS, one folder per project under `/srv`, one shared workspace, and this rep
 never at `/srv/workspace`: the agent then sees one tree, one git, and that repo's `AGENTS.md`.
 
 **One place for projects.** The Hermes agent (host, `/opt/data/home` HOME for its tools), Orca
-sessions (host, `/srv/orca` HOME), herdr panes and SSH shells (host, `/home/hermes` HOME) all work
+sessions, herdr panes and SSH shells (host, all three with the `/home/hermes` HOME) all work
 in `/srv/workspace`, as the same uid: a path, a git worktree or a handoff written by one tool
 is valid for all the others, with no ACL and no `chown`.
 
@@ -50,12 +49,12 @@ Tailnet ──443───▶ traefik ─file route─▶ host: hermes-dashboard
                     └▶ docker-socket-proxy    host: hermes-gateway, API 127.0.0.1:8642
 Tailnet ──9120─────────────────────────────▶ same dashboard, raw HTTP for Hermes Desktop (DESKTOP_BIND)
 Tailnet ──5432──▶ hermes-postgres (also 127.0.0.1:5432 for the agent)
-Tailnet ──6768──▶ orca.service on the host (User=hermes, HOME /srv/orca, cwd /srv/workspace)
+Tailnet ──6768──▶ orca.service on the host (User=hermes, HOME /home/hermes, cwd /srv/workspace)
 Tailnet ──22────▶ sshd → `herdr` attaches to herdr.service (User=hermes, panes in /srv/workspace)
 ```
 
-Three HOMEs, one uid: `/home/hermes` (SSH + herdr), `/srv/orca` (Orca), `/srv/hermes/data/home`
-(agent tools, `terminal.home_mode: profile`). Coding CLIs (`claude` / `codex` / `grok`) are the
+Two HOMEs, one uid: `/home/hermes` (SSH, herdr and Orca: one set of logins, plugins, skills and
+session history) and `/srv/hermes/data/home` (agent tools, `terminal.home_mode: profile`). Coding CLIs (`claude` / `codex` / `grok`) are the
 host's (installed and updated by `orca.sh`), used by every HOME; their credentials remain separate (only credential
 files are ever copied between HOMEs: `orca.sh creds`, `herdr.sh creds` — grok and gh only; Claude
 and Codex rotate a single-use refresh token, so a copied login gets revoked on its first refresh
@@ -134,7 +133,7 @@ Use it: `ssh hermes@<tailscale-ip>` → `herdr` (detach `ctrl+b q`), or from a l
 Code in the workspace (`/srv/workspace/projects/helios`, git), deployment in `/srv/helios`
 (`.env` with the tinyauth / domain settings, `tinyauth/data`). `sudo command-center helios deploy`
 runs the repo's `deploy.sh` as `hermes` with `HELIOS_ENV_FILE=/srv/helios/.env` and
-`HELIOS_STATE_DIR=/srv/helios`; `HOME` is `HELIOS_CLI_HOME` (default `/srv/orca`: fitness-sync reads
+`HELIOS_STATE_DIR=/srv/helios`; `HOME` is `HELIOS_CLI_HOME` (default `/home/hermes`: fitness-sync reads
 its CLI logins for the quota panel, `deploy.sh` its `bws` binary and token under `.hermes/`). Compose
 project `loukass`, on the `proxy` network (subnet pinned to `PROXY_SUBNET`, which tinyauth trusts).
 
@@ -443,16 +442,16 @@ Health / markets sqlite lives in `/opt/data/private/` (host `data/private/`). MC
 sessions yourself — parallel agents, worktrees, diff review — from the Orca desktop app or the
 mobile app, with the runtime on the VPS. It is deliberately **not a container**: `orca.sh`
 installs it on the host as `orca.service`, running as **`hermes`** (the same uid as `harden.sh`
-and the agent binds) with its own `HOME` (`ORCA_HOME`, default `/srv/orca`, mode 0700 —
-**not** `/home/hermes`, **not** mounted in the agent). Sessions cwd is
+and the agent binds) with the operator `HOME` (`ORCA_HOME`, default `/home/hermes` — the same as
+herdr and SSH, **not** mounted in the agent). Sessions cwd is
 `/srv/workspace` (the same tree, at the same path, as the agent and herdr). Orca creates its
 worktrees in `/srv/workspace/worktrees/orca` (Settings → workspace directory, set by the migration).
 
-HOMEs stay split so a hook planted in the agent's `~/.claude/settings.json` or a
-`core.hooksPath` in the agent's gitconfig cannot run as a sudoer. `orca.sh install` copies only
-the agent's **credential files** into `ORCA_HOME` (same accounts, no second login). Repo-local
-git hooks in the workspace are overridden for Orca by `GIT_CONFIG_COUNT` in `/etc/orca.env`
-(git `-c` rank). Treat the workspace as **untrusted for sudo** (Makefiles / `deploy.sh` remain a
+The agent's HOME stays split so a hook planted in its `~/.claude/settings.json` or a
+`core.hooksPath` in its gitconfig cannot run as a sudoer. `orca.sh install` copies only the
+agent's grok / gh **credential files** into `ORCA_HOME`. Repo-local git hooks in the workspace
+are overridden for Orca sessions by `GIT_CONFIG_COUNT` in `/etc/orca.env` (git `-c` rank, empty
+root-owned `/opt/orca/git-hooks`); herdr and SSH shells keep running them (lefthook). Treat the workspace as **untrusted for sudo** (Makefiles / `deploy.sh` remain a
 residual risk). There is no dedicated `orca` user and no POSIX ACLs on this checkout.
 
 ```bash
@@ -550,7 +549,7 @@ and deduplicates; retention 7 daily / 4 weekly / 6 monthly, prune on Sundays. `/
 Each run first takes `hermes backup` inside the agent (consistent `state.db` snapshot), then
 writes a fresh `pg_dumpall` of `hermes-postgres` to `postgres/dumps/`, then uploads `data/`,
 the workspace (`HERMES_WORKSPACE_DIR`), `obsidian/`, `postgres/dumps/`, `state/traefik/acme.json`,
-the command center `.env`, `/srv/orca` and `/srv/helios` (when present) — minus `node_modules`,
+the command center `.env`, Orca's state (`/home/hermes/.config/orca`) and `/srv/helios` (when present) — minus `node_modules`,
 venvs, caches, browser profiles. herdr is not backed up (`command-center herdr install` rebuilds it).
 
 **Keep `RESTIC_PASSWORD`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` and `RESTIC_REPOSITORY` outside the
@@ -580,7 +579,7 @@ prints the matching `rsync` lines.
    `postgres/dumps/`, `acme.json`, `.env`).
 4. `sudo ./install.sh` again (re-chowns for this host's `hermes` uid, sets `DESKTOP_BIND`,
    recreates), then load the newest dump into the fresh PostgreSQL (printed `zcat … | psql` line).
-   If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of `ORCA_HOME`
+   If Orca was installed: `sudo ./orca.sh install`, then the printed `rsync` of `ORCA_HOME/.config/orca`
    (pairings, state). Helios: the printed `rsync` of `/srv/helios`, `git clone` of the repo into
    `/srv/workspace/projects/helios` if the workspace snapshot lacks it, `sudo command-center helios deploy`.
    herdr: `sudo command-center herdr install`. Finally `sudo rm -rf /srv/restore` (it holds every secret in clear).
@@ -798,7 +797,7 @@ Node, Xvfb and the Electron libraries.
 | `hermes/Dockerfile` | rollback only: `FROM nousresearch/hermes-agent:latest` + CLIs and operator tools |
 | `obsidian/entrypoint.sh` | install `obsidian-headless@0.0.14` into the volume, then `ob` |
 | `command-center` | CLI / menu: status, one-click deploys, admin of hermes / orca / helios / herdr / workspace |
-| `orca.sh` / `orca/orca.service` | Orca on the host as `User=hermes`, HOME `/srv/orca`, cwd `/srv/workspace`, `GIT_CONFIG_COUNT` |
+| `orca.sh` / `orca/orca.service` | Orca on the host as `User=hermes`, HOME `/home/hermes`, cwd `/srv/workspace`, `GIT_CONFIG_COUNT` |
 | `helios.sh` | Helios deploy/admin: code `/srv/workspace/projects/helios`, deployment `/srv/helios` |
 | `herdr.sh` / `herdr/herdr.service` | herdr + terminal-code plugin for `hermes`, `herdr server` as a systemd service |
 | `discord-backup.sh` | Discord backup bot: tested releases in `/srv/discord-backup`, units from the repo's `deploy/`, BWS secrets |

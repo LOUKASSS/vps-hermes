@@ -14,7 +14,7 @@
 # tinyauth state; Helios code is in the workspace), $DISCORD_BACKUP_DIR/var (the Discord bot's
 # archives, already AES-256-GCM sealed with a key that lives only in Bitwarden, + its state), a fresh
 # pg_dumpall of hermes-postgres under $POSTGRES_DIR/dumps and, when Orca is installed on the
-# host, $ORCA_HOME (Orca state, pairings, its copies of the logins).
+# host, $ORCA_HOME/.config/orca (Orca state, pairings; the logins are the operator HOME's).
 # Retention: 7 daily, 4 weekly, 6 monthly; prune runs on Sundays.
 #
 # Keep RESTIC_PASSWORD + the B2 credentials somewhere safe (password manager): without them the
@@ -114,7 +114,7 @@ do_run() {
   # 3. Encrypted, deduplicated upload of the host paths.
   info "restic backup → $RESTIC_REPOSITORY"
   local paths=("$HERMES_DATA_DIR" "$HERMES_WORKSPACE_DIR" "$OBSIDIAN_DIR" "$TRAEFIK_DIR/acme.json" "$STACK_DIR/.env" "$POSTGRES_DIR/dumps")
-  [ -d "$ORCA_HOME" ] && paths+=("$ORCA_HOME")
+  [ -d "$ORCA_HOME/.config/orca" ] && paths+=("$ORCA_HOME/.config/orca")
   [ -d "$HELIOS_DIR" ] && paths+=("$HELIOS_DIR")
   [ -d "$DISCORD_BACKUP_DIR/var" ] && paths+=("$DISCORD_BACKUP_DIR/var")
   restic_run backup --tag hermes-stack "${EXCLUDES[@]}" "${paths[@]}"
@@ -146,7 +146,7 @@ Restored under $target. To put it back in place with the stack stopped (as root 
   sudo mkdir -p $POSTGRES_DIR/dumps && sudo rsync -a $target$POSTGRES_DIR/dumps/ $POSTGRES_DIR/dumps/
   sudo $STACK_DIR/install.sh     # re-chowns, re-applies DESKTOP_BIND/HERMES_UID for this host, recreates
   zcat $POSTGRES_DIR/dumps/pg_dumpall-<latest>.sql.gz | sudo docker exec -i hermes-postgres psql -U $POSTGRES_USER -d postgres   # PostgreSQL data
-$( [ -d "$target$ORCA_HOME" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R hermes:hermes %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME" "$ORCA_HOME" "$ORCA_HOME" )
+$( [ -d "$target$ORCA_HOME/.config/orca" ] && printf '  sudo %s/orca.sh install && sudo rsync -a %s/ %s/ && sudo chown -R hermes:hermes %s && sudo systemctl restart orca   # Orca state + pairings\n' "$STACK_DIR" "$target$ORCA_HOME/.config/orca" "$ORCA_HOME/.config/orca" "$ORCA_HOME/.config/orca" )
 $( [ -d "$target$HELIOS_DIR" ] && printf '  sudo rsync -a %s/ %s/ && sudo %s/command-center helios deploy   # Helios .env + tinyauth state\n' "$target$HELIOS_DIR" "$HELIOS_DIR" "$STACK_DIR" )
 $( [ -d "$target$DISCORD_BACKUP_DIR/var" ] && printf '  sudo %s/command-center discord-backup install && sudo %s/command-center discord-backup import %s   # Discord archives (key: Bitwarden)\n' "$STACK_DIR" "$STACK_DIR" "$target$DISCORD_BACKUP_DIR/var" )
   sudo $STACK_DIR/command-center herdr install   # herdr + terminal-code plugin (not backed up: reinstallable)
