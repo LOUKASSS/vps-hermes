@@ -1,0 +1,8 @@
+# Orca workspace setup — https://www.onorca.dev/docs/model/worktrees
+# Source: LOUKASSS/command-center orca/orca.yaml.npm (copied into each npm repo).
+# Runs once in every new Orca worktree; ORCA_ROOT_PATH = main checkout, ORCA_WORKTREE_PATH = new one.
+scripts:
+  setup: |
+    npm ci --prefer-offline --no-audit --no-fund
+# Agents start once node_modules exists (build / lint / tests work on their first command).
+setupAgentStartupPolicy: wait-for-setup
