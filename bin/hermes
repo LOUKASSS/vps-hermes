@@ -35,6 +35,25 @@ MSG
   exit 2
 fi
 
+# Hermes Desktop (SSH mode) writes a one-shot token under the login HOME
+# ($HOME/.hermes/desktop-ssh/<id>/<nonce>.token) and passes it to `serve`, which only accepts it
+# under its own HOME — /opt/data/home once agent_exec re-homes it. Move the token there (the
+# server reads then unlinks it) and point the flag at the new path.
+args=("$@")
+for i in "${!args[@]}"; do
+  [ "${args[$i]}" = --ssh-session-token-file ] || continue
+  src="${args[$((i + 1))]:-}"
+  case "$src" in "$HOME"/.hermes/desktop-ssh/*/*.token) ;; *) break ;; esac
+  dst_root=/opt/data/home/.hermes/desktop-ssh
+  dst_dir="$dst_root/$(basename "$(dirname "$src")")"
+  if ! (umask 077 && mkdir -p "$dst_dir" && chmod 700 "$dst_root" "$dst_dir"); then
+    die "cannot prepare $dst_dir for the Desktop SSH token"
+  fi
+  mv -f "$src" "$dst_dir/" || die "cannot move the Desktop SSH token to $dst_dir"
+  args[i + 1]="$dst_dir/$(basename "$src")"
+  break
+done
+
 # No `exec`: this script — a process named `hermes` — stays in the terminal's foreground, which is
 # how herdr recognises the agent and tracks idle / working / blocked. Its exit status is the CLI's.
-agent_exec hermes "$@"
+agent_exec hermes "${args[@]}"
