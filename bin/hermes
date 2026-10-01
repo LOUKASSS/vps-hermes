@@ -54,6 +54,19 @@ for i in "${!args[@]}"; do
   break
 done
 
+# agent_exec starts from `env -i`, which drops the markers Desktop sets on its spawn
+# (`exec env HERMES_DESKTOP=1 [HERMES_GUEST_ONBOARDING=1] hermes serve …`). Without
+# HERMES_DESKTOP=1 the loopback backend is not recognised as Desktop-owned: the dashboard auth
+# gate engages and refuses the per-spawn session token on /api/ws. Forward them when set.
+passthrough=()
+for var in HERMES_DESKTOP HERMES_GUEST_ONBOARDING; do
+  [ -n "${!var:-}" ] && passthrough+=("$var=${!var}")
+done
+
 # No `exec`: this script — a process named `hermes` — stays in the terminal's foreground, which is
 # how herdr recognises the agent and tracks idle / working / blocked. Its exit status is the CLI's.
-agent_exec hermes "${args[@]}"
+if [ "${#passthrough[@]}" -gt 0 ]; then
+  agent_exec env "${passthrough[@]}" hermes "${args[@]}"
+else
+  agent_exec hermes "${args[@]}"
+fi
