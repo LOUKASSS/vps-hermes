@@ -58,8 +58,16 @@ done
 # (`exec env HERMES_DESKTOP=1 [HERMES_GUEST_ONBOARDING=1] hermes serve …`). Without
 # HERMES_DESKTOP=1 the loopback backend is not recognised as Desktop-owned: the dashboard auth
 # gate engages and refuses the per-spawn session token on /api/ws. Forward them when set.
+#
+# Same for the variables an Orca terminal sets for its agent-status hooks: the orca-status plugin
+# (linked into /opt/data/plugins by orca.sh) reads them to post working / done / waiting to Orca
+# on loopback; without them it stays silent and Orca shows the pane as done. Only what the plugin
+# reads — not ORCA_HISTFILE, ORCA_PORT, ORCA_PAIRING… (the endpoint file holds the current port).
 passthrough=()
-for var in HERMES_DESKTOP HERMES_GUEST_ONBOARDING; do
+for var in HERMES_DESKTOP HERMES_GUEST_ONBOARDING \
+  ORCA_AGENT_HOOK_ENDPOINT ORCA_AGENT_HOOK_PORT ORCA_AGENT_HOOK_TOKEN ORCA_AGENT_HOOK_ENV \
+  ORCA_AGENT_HOOK_VERSION ORCA_AGENT_LAUNCH_TOKEN \
+  ORCA_PANE_KEY ORCA_TAB_ID ORCA_WORKTREE_ID; do
   [ -n "${!var:-}" ] && passthrough+=("$var=${!var}")
 done
 
