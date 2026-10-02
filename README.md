@@ -230,6 +230,8 @@ What it does:
 - then **sshd** hardening: keys only, no root, `AllowUsers hermes`, `MaxAuthTries 3`;
 - **unattended-upgrades** (security + updates + Docker/Tailscale repos), unused-package cleanup,
   automatic reboot at 02:00 when required (before the 03:00 backup and the 04:00 nightly update), `needrestart` in auto mode;
+- a 4 GB `/swapfile` (`SWAP_SIZE`, `0` = none) with `vm.swappiness=10`, so a load peak of
+  agents and dev servers is not a global OOM at once;
 - fail2ban (sshd), sysctl hardening, journald limits, Docker `daemon.json` (live-restore, log
   rotation), `/srv/{hermes,helios,workspace}` owned by `hermes` and a copy of this repo in `/srv/command-center`.
 
@@ -461,8 +463,17 @@ sudo ./orca.sh creds           # re-copy the agent's grok / gh logins after `aut
 sudo ./orca.sh login claude    # Orca's own login (required for claude|codex, optional for grok|gh)
 sudo ./orca.sh skills          # (re)install the Orca skills (also run by install and on every new release)
 sudo ./orca.sh repos           # register every git repo of /srv/workspace/projects (idempotent)
+sudo ./orca.sh daemon-policy   # OOMPolicy=continue for the terminal daemon (also run by install and every update)
 sudo ./orca.sh status | logs
 ```
+
+**Memory.** `MemoryMax` (`ORCA_MEM_LIMIT`) only caps the server: Orca runs its terminal daemon
+(every pane and session) in a transient `orca-daemon-<nonce>.scope` of the `hermes` user manager.
+With systemd's default `OOMPolicy=stop`, one process of that scope killed by a global OOM (usually
+a chrome renderer of chrome-devtools-mcp, `oom_score_adj=300`) stopped the whole scope — every
+terminal at once. The root-owned drop-in `/etc/systemd/user/orca-daemon-.scope.d/10-oom.conf`
+(`orca/orca-daemon-oom.conf`) sets `OOMPolicy=continue`: only the killed process goes.
+`orca.sh status` shows the policy of the live scope.
 
 **Skills.** `orca-cli`, `orchestration` and `computer-use` are installed globally in `ORCA_HOME`
 for Claude Code, Codex, Grok, Hermes and the shared `.agents/skills` (`orca skills install
@@ -736,7 +747,7 @@ runs, and while `/srv/command-center/.maintenance` exists — **touch that file 
 **Restarting the agent:** `sudo command-center hermes restart` (after a change to `data/.env`);
 after editing `.env`: `sudo command-center hermes units && sudo command-center hermes restart`.
 Resource limits: `AGENT_MEM_LIMIT`, `AGENT_CPUS` (hermes-gateway drop-in), `ORCA_MEM_LIMIT`
-(orca.service) in `.env`.
+(orca.service), `SWAP_SIZE` (`/swapfile`, harden.sh + install.sh, default 4G) in `.env`.
 
 **Updating these scripts:** `cd /srv/command-center && git pull` (as `hermes`, no sudo) then
 `sudo ./install.sh`.
@@ -779,7 +790,8 @@ sudo rm -rf /srv/hermes /srv/orca /srv/helios /srv/workspace /srv/command-center
 `harden.sh` leftovers if you want the host back to stock: `ufw --force reset` (the HERMES block
 in `/etc/ufw/after*.rules` included), `/etc/ssh/sshd_config.d/00-hermes-hardening.conf`,
 `/etc/sudoers.d/90-hermes`, `/etc/apt/apt.conf.d/20auto-upgrades` + `52-hermes-unattended`,
-`/etc/fail2ban/jail.d/sshd.local`, `/etc/sysctl.d/90-hardening.conf`,
+`/etc/fail2ban/jail.d/sshd.local`, `/etc/sysctl.d/90-hardening.conf`, `/etc/sysctl.d/91-swap.conf`
+(+ `swapoff /swapfile`, its `/etc/fstab` line and the file),
 `/etc/systemd/journald.conf.d/90-limits.conf`, `/etc/needrestart/conf.d/90-auto.conf`,
 `/etc/docker/daemon.json`, `/root/hermes-ssh/`, the Tailscale and GitHub CLI apt repos +
 keyrings, user `hermes`, Tailscale itself. `orca.sh install` also left NodeSource's repo,

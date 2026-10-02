@@ -22,7 +22,12 @@ ExecStartPre=+/bin/sh -c 'for t in /usr/sbin/iptables /usr/sbin/ip6tables; do [ 
 ExecStart=/bin/sh -c 'exec /opt/orca/current/AppRun serve --port "$ORCA_PORT" --pairing-address "$DESKTOP_BIND" $ORCA_PAIRING'
 Restart=always
 RestartSec=5
+# Covers the server only: the terminals live in orca-daemon-*.scope of the hermes user manager
+# (OOMPolicy there: orca/orca-daemon-oom.conf).
 MemoryMax=@MEM@
+# At MemoryMax the kernel kills one process (session scanner, a zygote); the default
+# OOMPolicy=stop would stop the server with it.
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target
