@@ -23,6 +23,7 @@
 #   sudo ./orca.sh share              # no-op (same uid as the stack; no POSIX ACLs)
 #   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as hermes in ORCA_HOME (separate from the agent)
 #   sudo ./orca.sh skills             # (re)install the Orca skills for claude/codex/grok/hermes (install + each new release)
+#   sudo ./orca.sh hermes-status      # link + enable Orca's Hermes status plugin in /opt/data (install + each update)
 #   sudo ./orca.sh repos              # register every git repo of HERMES_WORKSPACE_DIR/projects (setup = each repo's orca.yaml)
 #   sudo ./orca.sh status | logs | remove
 #
@@ -225,6 +226,39 @@ sync_skills() {
     || { warn "orca skills install failed (retry: sudo $0 skills)"; return 1; }
 }
 
+# ── Hermes agent status in Orca (working / done / waiting) ──────────────
+# Orca reads a Hermes pane's state only from its `orca-status` hook plugin, which it writes (and
+# rewrites at each start) under $HERMES_HOME/plugins of its own process: ORCA_HOME/.hermes. Hermes
+# runs with HERMES_HOME=$HERMES_DATA_DIR (/opt/data) and never loads it from there. Link it into the
+# agent's plugins (a link, not a copy: Orca keeps owning and updating the files) and enable it in
+# the live config.yaml. Outside an Orca pane (gateway, dashboard, herdr, SSH) the plugin finds no
+# ORCA_* variables (bin/hermes forwards them) and returns without posting anything.
+ORCA_HERMES_PLUGIN="orca-status"
+link_hermes_status_plugin() {
+  local src="$ORCA_HOME/.hermes/plugins/$ORCA_HERMES_PLUGIN" dst="$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN"
+  hermes_installed || { info "Hermes not installed: Orca status plugin not linked"; return 0; }
+  # agent_run dies without agent.env: check first so the nightly update is never cut short here.
+  [ -r "$AGENT_ENV" ] || { warn "$AGENT_ENV unreadable: Orca status plugin not linked (sudo command-center hermes units)"; return 1; }
+  # Orca writes the plugin shortly after it starts (install calls this right after the restart).
+  local _; for _ in 1 2 3 4 5; do [ -f "$src/__init__.py" ] && break; sleep 2; done
+  if [ ! -f "$src/plugin.yaml" ] || [ ! -f "$src/__init__.py" ]; then
+    warn "Orca has not written its Hermes status plugin ($src): Hermes panes will show as done (retry once Orca is up: sudo $0 hermes-status)"
+    return 1
+  fi
+  if [ -e "$dst" ] && [ ! -L "$dst" ]; then
+    warn "$dst exists and is not a link to Orca's plugin: left alone (remove it, then: sudo $0 hermes-status)"
+    return 1
+  fi
+  if [ "$(readlink "$dst" 2>/dev/null)" != "$src" ]; then
+    runuser -u "$ORCA_USER" -- ln -sfn "$src" "$dst" || { warn "cannot link $dst → $src"; return 1; }
+    info "Hermes plugin $ORCA_HERMES_PLUGIN: $dst → $src"
+  fi
+  # Idempotent ("already enabled"); also nudges the running gateway to reload its plugins.
+  agent_run hermes plugins enable "$ORCA_HERMES_PLUGIN" --no-allow-tool-override >/dev/null \
+    || { warn "hermes plugins enable $ORCA_HERMES_PLUGIN failed (retry: sudo $0 hermes-status)"; return 1; }
+  info "Hermes plugin $ORCA_HERMES_PLUGIN enabled (new Hermes sessions in Orca report working / done)"
+}
+
 # ── release download: verify sha512 from the electron-builder manifest, extract (no FUSE) ──
 # fetch_release <tag|latest> → sets FETCHED_TAG (downloads only if that tag is not there yet)
 fetch_release() {
@@ -362,6 +396,7 @@ do_install() {
   fi
   [ -x /usr/sbin/iptables ] || warn "/usr/sbin/iptables not found: orca.service cannot restrict port $ORCA_PORT to the tailnet itself (apt install iptables, or rely on ufw)."
   restart_and_pair
+  link_hermes_status_plugin || true
 }
 
 # The CLIs are refreshed every time (new sessions pick them up, no restart needed); Orca itself
@@ -374,6 +409,10 @@ do_update() {
   fi
   [ "${1:-}" = --force ] && rm -f "$ORCA_ROOT/.hold"
   update_clis || warn "coding CLIs: update failed (see above)"
+  # Before the "is current" return: `command-center deploy orca` is this command. A new release
+  # rewrites the plugin files in place, so the link survives the restart below.
+  # warn, not notify: a missing plugin would otherwise page every night (orca.sh status shows it).
+  link_hermes_status_plugin || warn "Hermes status plugin not linked — Hermes panes show as done in Orca (sudo $0 hermes-status)"
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -442,6 +481,7 @@ do_status() {
     echo "input rules: $(/usr/sbin/iptables -S INPUT 2>/dev/null | grep -c -- "--dport $ORCA_PORT " || echo 0)/3 (tailscale0 + lo accept, else drop)  ufw: $(ufw status 2>/dev/null | sed -n 's/^Status: //p' || echo n/a)"
     echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR · git-hooks $ORCA_HOOKS"
     echo "skills: $(cd "$ORCA_HOME" && for s in "${ORCA_SKILLS[@]}"; do [ -f ".agents/skills/$s/SKILL.md" ] && printf '%s ' "$s" || printf '%s(missing) ' "$s"; done)"
+    echo "hermes status plugin: $([ -f "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN/plugin.yaml" ] && echo "linked ($(readlink "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN"))" || echo "missing (sudo $0 hermes-status)")"
     local f; for f in "${CRED_FILES[@]}"; do [ -f "$ORCA_HOME/$f" ] && echo "  login: $f" || echo "  no login: $f"; done
     echo "stack $STACK_DIR: same uid $ORCA_USER (no ACL share)"
   else
@@ -486,6 +526,10 @@ do_remove() {
   rm -f "$ORCA_UNIT" "$ORCA_ENV" /usr/local/bin/orca
   systemctl daemon-reload
   rm -rf "$ORCA_ROOT"
+  if [ "$(readlink "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN" 2>/dev/null)" = "$ORCA_HOME/.hermes/plugins/$ORCA_HERMES_PLUGIN" ]; then
+    rm -f "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN"
+    hermes_installed && { agent_run hermes plugins disable "$ORCA_HERMES_PLUGIN" >/dev/null 2>&1 || warn "hermes plugins disable $ORCA_HERMES_PLUGIN failed"; }
+  fi
   info "Orca removed (unit, $ORCA_ENV, $ORCA_ROOT). Kept: Node + claude/codex/grok/gh, user $ORCA_USER (harden.sh — not deleted), $ORCA_HOME (state, logins)."
 }
 
@@ -500,10 +544,11 @@ case "${1:-}" in
   # the new HOME / WorkingDirectory apply at the next restart). Used by migrate-srv-layout.sh.
   write-service) [ -e "$ORCA_UNIT" ] || die "Orca is not installed"; write_service; info "orca.service rewritten (applies at next restart)" ;;
   skills)   sync_skills ;;
+  hermes-status) link_hermes_status_plugin ;;
   repos)    do_repos ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
   remove)   do_remove ;;
-  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | skills | repos | login <claude|codex|grok|gh> | status | logs | remove" ;;
+  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | skills | hermes-status | repos | login <claude|codex|grok|gh> | status | logs | remove" ;;
 esac
