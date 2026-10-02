@@ -133,6 +133,7 @@ fs.protected_hardlinks = 1
 fs.protected_symlinks = 1
 SYSCTL
 sysctl -q --system >/dev/null
+ensure_swap
 
 install -d /etc/systemd/journald.conf.d
 printf '[Journal]\nSystemMaxUse=500M\nMaxRetentionSec=1month\n' > /etc/systemd/journald.conf.d/90-limits.conf

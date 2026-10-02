@@ -24,6 +24,7 @@
 #   sudo ./orca.sh login <claude|codex|grok|gh>   # log in as hermes in ORCA_HOME (separate from the agent)
 #   sudo ./orca.sh skills             # (re)install the Orca skills for claude/codex/grok/hermes (install + each new release)
 #   sudo ./orca.sh hermes-status      # link + enable Orca's Hermes status plugin in /opt/data (install + each update)
+#   sudo ./orca.sh daemon-policy      # OOMPolicy=continue for the terminal daemon scopes (install + each update)
 #   sudo ./orca.sh repos              # register every git repo of HERMES_WORKSPACE_DIR/projects (setup = each repo's orca.yaml)
 #   sudo ./orca.sh status | logs | remove
 #
@@ -333,6 +334,27 @@ EOF
   systemctl daemon-reload
 }
 
+# Orca's terminal daemon (every pane and session) runs in a transient orca-daemon-<nonce>.scope
+# of the hermes user manager, not in orca.service: the unit's MemoryMax / OOMPolicy do not reach
+# it. A root-owned prefix drop-in in /etc (a session cannot revert it) sets OOMPolicy=continue;
+# the reload applies it to the live scope too, no restart.
+ORCA_DAEMON_DROPIN=/etc/systemd/user/orca-daemon-.scope.d/10-oom.conf
+daemon_scopes() { systemctl --user -M "$ORCA_USER@" list-units --plain --no-legend 'orca-daemon-*.scope' 2>/dev/null | awk '{print $1}'; }
+install_daemon_policy() {
+  install -D -m 0644 -o root -g root "$STACK_DIR/orca/orca-daemon-oom.conf" "$ORCA_DAEMON_DROPIN"
+  if ! systemctl --user -M "$ORCA_USER@" daemon-reload 2>/dev/null; then
+    info "User manager of $ORCA_USER not running: $ORCA_DAEMON_DROPIN applies when it starts"
+    return 0
+  fi
+  local s bad=0
+  for s in $(daemon_scopes); do
+    [ "$(systemctl --user -M "$ORCA_USER@" show -p OOMPolicy --value "$s")" = continue ] \
+      || { warn "$s: OOMPolicy is not continue"; bad=1; }
+  done
+  [ "$bad" -eq 0 ] || return 1
+  info "Terminal daemon scopes: OOMPolicy=continue ($ORCA_DAEMON_DROPIN)"
+}
+
 wait_up() {
   for _ in $(seq 1 24); do
     curl -sS -o /dev/null "http://127.0.0.1:$ORCA_PORT/" 2>/dev/null && return 0   # any HTTP answer = up
@@ -390,6 +412,7 @@ do_install() {
   sync_creds
   sync_skills || true
   write_service
+  install_daemon_policy || warn "terminal daemon OOMPolicy not applied (sudo $0 daemon-policy)"
   systemctl enable -q orca
   if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
     warn "ufw is not active: only orca.service's own INPUT rules keep port $ORCA_PORT off the WAN (harden.sh sets up the firewall)."
@@ -413,6 +436,7 @@ do_update() {
   # rewrites the plugin files in place, so the link survives the restart below.
   # warn, not notify: a missing plugin would otherwise page every night (orca.sh status shows it).
   link_hermes_status_plugin || warn "Hermes status plugin not linked — Hermes panes show as done in Orca (sudo $0 hermes-status)"
+  install_daemon_policy || warn "terminal daemon OOMPolicy not applied — one OOM kill stops every terminal (sudo $0 daemon-policy)"
   orca_resolve_version
   local cur; cur="$(installed_version)"
   fetch_release "${ORCA_VERSION:-latest}"
@@ -479,6 +503,7 @@ do_status() {
     echo "orca $(installed_version) (previous: $(cat "$ORCA_ROOT/previous/VERSION" 2>/dev/null || echo none))  orca.service: $(systemctl is-active orca 2>/dev/null)$([ -e "$ORCA_ROOT/.hold" ] && echo "  UPDATES ON HOLD (update --force)")"
     echo "listening: $(ss -ltnH "sport = :$ORCA_PORT" 2>/dev/null | awk '{print $4}' | tr '\n' ' ')  advertised: ${DESKTOP_BIND:-?}:$ORCA_PORT  pairing: $([ -n "${ORCA_PAIRING:-}" ] && echo mobile || echo desktop)"
     echo "input rules: $(/usr/sbin/iptables -S INPUT 2>/dev/null | grep -c -- "--dport $ORCA_PORT " || echo 0)/3 (tailscale0 + lo accept, else drop)  ufw: $(ufw status 2>/dev/null | sed -n 's/^Status: //p' || echo n/a)"
+    local s; for s in $(daemon_scopes); do echo "terminal daemon $s: OOMPolicy=$(systemctl --user -M "$ORCA_USER@" show -p OOMPolicy --value "$s")"; done
     echo "user $ORCA_USER · HOME=$ORCA_HOME · cwd $ORCA_WORKDIR · git-hooks $ORCA_HOOKS"
     echo "skills: $(cd "$ORCA_HOME" && for s in "${ORCA_SKILLS[@]}"; do [ -f ".agents/skills/$s/SKILL.md" ] && printf '%s ' "$s" || printf '%s(missing) ' "$s"; done)"
     echo "hermes status plugin: $([ -f "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN/plugin.yaml" ] && echo "linked ($(readlink "$HERMES_DATA_DIR/plugins/$ORCA_HERMES_PLUGIN"))" || echo "missing (sudo $0 hermes-status)")"
@@ -545,10 +570,11 @@ case "${1:-}" in
   write-service) [ -e "$ORCA_UNIT" ] || die "Orca is not installed"; write_service; info "orca.service rewritten (applies at next restart)" ;;
   skills)   sync_skills ;;
   hermes-status) link_hermes_status_plugin ;;
+  daemon-policy) install_daemon_policy ;;
   repos)    do_repos ;;
   login)    do_login "${2:-}" ;;
   status)   do_status ;;
   logs)     journalctl -u orca -f -o cat ;;
   remove)   do_remove ;;
-  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | skills | hermes-status | repos | login <claude|codex|grok|gh> | status | logs | remove" ;;
+  *) die "usage: $0 install | update [--force] | rollback | pair [desktop|mobile] | creds | share | write-service | skills | hermes-status | daemon-policy | repos | login <claude|codex|grok|gh> | status | logs | remove" ;;
 esac

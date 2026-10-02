@@ -284,6 +284,42 @@ ensure_workspace() {
   fi
 }
 
+# ensure_swap — SWAP_SIZE (default 4G, 0 = none) /swapfile + vm.swappiness=10. Without swap, a load
+# peak (several astro dev / workerd / claude sessions) is a global OOM at once. Idempotent; an
+# already active swap is kept as is (harden.sh, or alone: sudo bash -c '. lib/common.sh; ensure_swap').
+# Never fatal (harden.sh runs under set -e): no swap is a warning, not a half-hardened host.
+ensure_swap() {
+  local size="${SWAP_SIZE:-4G}" f=/swapfile bytes
+  bytes="$(numfmt --from=iec "${size^^}" 2>/dev/null)" || { warn "SWAP_SIZE=$size is not a size — no swap"; return 0; }
+  [ "$bytes" -gt 0 ] || return 0
+  printf 'vm.swappiness = 10\n' > /etc/sysctl.d/91-swap.conf
+  sysctl -q -p /etc/sysctl.d/91-swap.conf >/dev/null || warn "vm.swappiness not applied"
+  if [ -n "$(swapon --noheadings --show=NAME)" ]; then
+    info "Swap already active: $(swapon --noheadings --show=NAME,SIZE | tr -s ' \n' ' ')"
+    return 0
+  fi
+  no_symlink "$f" "$f.new"
+  if [ -e "$f" ] && [ "$(blkid -p -s TYPE -o value "$f" 2>/dev/null)" != swap ]; then
+    warn "$f exists and is not a swap file — left alone, no swap"; return 0
+  fi
+  if [ ! -e "$f" ]; then
+    # 2× margin: a full / starves Docker, journald and apt — worse than the OOM this prevents.
+    [ "$(df --output=avail -B1 / | tail -n1)" -gt $((bytes * 2)) ] \
+      || { warn "Not enough free space on / for a $size swap — skipped"; return 0; }
+    # Built under a temp name: an interrupted run never leaves a partial $f behind.
+    rm -f "$f.new"
+    { fallocate -l "$bytes" "$f.new" && chmod 600 "$f.new" && mkswap "$f.new" >/dev/null && mv "$f.new" "$f"; } \
+      || { rm -f "$f.new"; warn "Could not create $f — no swap"; return 0; }
+  fi
+  chmod 600 "$f"
+  swapon "$f" || { warn "swapon $f failed (btrfs / container?) — no swap"; return 0; }
+  if ! grep -qE "^${f}[[:space:]]" /etc/fstab; then
+    [ -z "$(tail -c1 /etc/fstab)" ] || echo >> /etc/fstab   # never glue onto an unterminated last line
+    echo "$f none swap sw 0 0" >> /etc/fstab
+  fi
+  info "Swap: $(swapon --noheadings --show=NAME,SIZE | tr -s ' \n' ' ')(vm.swappiness=10)"
+}
+
 # as_op <cmd…> — run as the operator user (hermes) with its login HOME (herdr, helios deploy).
 # HOME can be overridden: as_op_home <home> <cmd…>.
 as_op_home() {

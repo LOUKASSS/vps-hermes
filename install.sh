@@ -116,6 +116,8 @@ mkdir -p "$HERMES_DATA_DIR/home" "$HERMES_DATA_DIR/private" "$HERMES_DATA_DIR/mc
 mkdir -p "$POSTGRES_DIR/data" "$POSTGRES_DIR/dumps"; chmod 700 "$POSTGRES_DIR" "$POSTGRES_DIR/dumps"
 no_symlink "$HERMES_DATA_DIR/home" "$HERMES_WORKSPACE_DIR/$OBSIDIAN_VAULT_DIR"
 ensure_workspace
+# Also in harden.sh: a host hardened before swap existed gets it from any deploy (idempotent).
+ensure_swap
 # acme.json stays root-owned: Traefik runs as root with cap_drop ALL (no DAC_OVERRIDE), so it can
 # only open a mode-600 file it owns. Re-run of install.sh fixes older hermes-owned installs.
 touch "$TRAEFIK_DIR/acme.json"
