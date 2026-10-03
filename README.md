@@ -463,7 +463,7 @@ sudo ./orca.sh creds           # re-copy the agent's grok / gh logins after `aut
 sudo ./orca.sh login claude    # Orca's own login (required for claude|codex, optional for grok|gh)
 sudo ./orca.sh skills          # (re)install the Orca skills (also run by install and on every new release)
 sudo ./orca.sh repos           # register every git repo of /srv/workspace/projects (idempotent)
-sudo ./orca.sh daemon-policy   # OOMPolicy=continue for the terminal daemon (also run by install and every update)
+sudo ./orca.sh daemon-policy   # linger for hermes + OOMPolicy=continue for the terminal daemon (also run by install and every update)
 sudo ./orca.sh status | logs
 ```
 
