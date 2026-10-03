@@ -4,5 +4,6 @@
 scripts:
   setup: |
     npm ci --prefer-offline --no-audit --no-fund
-# Agents start once node_modules exists (build / lint / tests work on their first command).
-setupAgentStartupPolicy: wait-for-setup
+# Agents start right away; npm ci (~15 s) runs alongside in the Setup tab. wait-for-setup hung the
+# agent for 2 h whenever the Setup tab was closed (the gate only opens on Orca's completion marker).
+setupAgentStartupPolicy: start-immediately

@@ -483,8 +483,8 @@ release, so `orca.sh update` re-syncs them whenever it activates a new release.
 **Workspace setup.** `orca.sh repos` adds each checkout to the runtime; repos with an
 `origin/dev` branch get it as base ref (new worktrees branch off dev, not prod). What a new
 worktree runs comes from the repo's own `orca.yaml`, read **from the new worktree** — so from its
-base branch. Every npm repo carries [`orca/orca.yaml.npm`](orca/orca.yaml.npm) (`npm ci`, agents
-wait for it) and [`orca/worktreeinclude`](orca/worktreeinclude) as `.worktreeinclude` (copies
+base branch. Every npm repo carries [`orca/orca.yaml.npm`](orca/orca.yaml.npm) (`npm ci` in the
+Setup tab, agents start immediately — closing that tab must never block them) and [`orca/worktreeinclude`](orca/worktreeinclude) as `.worktreeinclude` (copies
 `.env` / `.dev.vars` from the main checkout when they exist); astro-template syncs both to the
 sites (`kit/sync/managed.json`). The desktop app asks once per repo to trust a new or changed
 `orca.yaml`; `npm ci` runs package install scripts as `hermes` (same residual risk as Makefiles).
